@@ -20,5 +20,6 @@
 `📦` Run go build<br>
 
 
-# Screenshot
-![Screenshot](https://media.discordapp.net/attachments/1429104035020935259/1438866332799209503/image.png?ex=69187032&is=69171eb2&hm=fd0bd5802aab60e17da5b85d4d1567c24846bde23980d29f670f1164a38564b5&=&format=webp&quality=lossless&width=662&height=719)
+# Link
+*For now, everything is on*  : https://frozi.lol/og
+
