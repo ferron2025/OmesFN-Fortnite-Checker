@@ -374,24 +374,26 @@ func main() {
 	// Initialize Discord RPC if enabled
 	if RPCEnabled {
 		initDiscordRPC()
-		updateDiscordPresence("Idle", "Ready to check Fortnite accounts")
+		updateDiscordPresence("Idle", "frozi.lol/r")
 	}
 
 	loadSkinsList()
 	for {
 		ClearConsole()
 		PrintLogo()
-		LogInfo("[1] FN Checker")
-		LogInfo("[2] 2FA Bypasser")
-		LogInfo("[4] Bruter")
+		LogInfo(centerText("[1] FN Checker", 80))
+		LogInfo(centerText("[2] 2FA Bypasser", 80))
+		LogInfo(centerText("[3] Links", 80))
+		LogInfo(centerText("[4] Bruter", 80))
 
-		fmt.Print("\n[>] ")
+		fmt.Println()
+		fmt.Print(centerText("[>] ", 80))
 
 		choice, _ := reader.ReadString('\n')
 		choice = strings.TrimSpace(choice)
 
 		switch choice {
-		case "1", "4": // Removed "3"
+		case "1", "4":
 			if ThreadCount <= 0 {
 				AskForThreads()
 			}
@@ -416,30 +418,58 @@ func main() {
 			}
 			// --- End proxy loading section ---
 			if len(Ccombos) == 0 {
-				LogError("No valid combos loaded. Please check combo.txt. Exiting.")
-				time.Sleep(3 * time.Second)
-				return
+				LogError("No valid combos loaded. Please check combo.txt.")
+				LogInfo("Press Enter to return to main menu...")
+				reader.ReadString('\n')
+				continue
 			}
 
 			// Discord Webhook Configuration
-			LogInfo("Do you want to use Discord webhook for hits? (y/n)")
+			LogInfo("Do you want to use webhook?")
 			fmt.Print("[>] ")
 			webhookChoice, _ := reader.ReadString('\n')
 			webhookChoice = strings.TrimSpace(strings.ToLower(webhookChoice))
 
 			if webhookChoice == "y" || webhookChoice == "yes" {
-				LogInfo("Enter your Discord webhook URL:")
-				fmt.Print("[>] ")
-				webhookURL, _ := reader.ReadString('\n')
-				webhookURL = strings.TrimSpace(webhookURL)
-				if webhookURL != "" {
-					DiscordWebhookURL = webhookURL
-					SendAllHits = true
-					LogInfo("Discord webhook configured successfully!")
+				if DiscordWebhookURL == "" {
+					LogInfo("Enter your discord webhook URL:")
+					fmt.Print("[>] ")
+					webhookURL, _ := reader.ReadString('\n')
+					webhookURL = strings.TrimSpace(webhookURL)
+					if webhookURL != "" {
+						DiscordWebhookURL = webhookURL
+						SendAllHits = true
+						// Save to config file
+						cfg, err := ini.Load("config.ini")
+						if err == nil {
+							if !cfg.HasSection("Discord") {
+								cfg.NewSection("Discord")
+							}
+							cfg.Section("Discord").Key("webhook_url").SetValue(webhookURL)
+							cfg.Section("Discord").Key("send_all_hits").SetValue("true")
+							cfg.SaveTo("config.ini")
+						}
+						LogInfo("Discord webhook configured and saved successfully!")
+					} else {
+						LogInfo("No webhook URL provided. Continuing without webhook.")
+					}
 				} else {
-					LogInfo("No webhook URL provided. Continuing without webhook.")
+					LogInfo("Using saved Discord webhook from config.")
+					SendAllHits = true
 				}
 			} else {
+				DiscordWebhookURL = ""
+				SendAllHits = false
+				// Save the "no webhook" choice to config
+				cfg, err := ini.Load("config.ini")
+				if err == nil {
+					if !cfg.HasSection("Discord") {
+						cfg.NewSection("Discord")
+					}
+					cfg.Section("Discord").Key("webhook_url").SetValue("")
+					cfg.Section("Discord").Key("send_all_hits").SetValue("false")
+					cfg.SaveTo("config.ini")
+				}
 				LogInfo("Continuing without Discord webhook.")
 			}
 
@@ -522,8 +552,9 @@ func main() {
 							select {
 							case <-done:
 								// Module completed successfully
-							case <-time.After(45 * time.Second): // Timeout prevents permanent hanging
-								LogError(fmt.Sprintf("TIMEOUT: Module for combo %s took longer than 45s", combo))
+							case <-time.After(300 * time.Second): // Increased timeout to 5 minutes to prevent hit skipping
+								LogError(fmt.Sprintf("TIMEOUT: Module for combo %s took longer than 300s", combo))
+								GetStats().ExportRetries(combo, "timeout", false)
 							}
 						}
 						WorkWg.Done()
@@ -539,7 +570,8 @@ func main() {
 			titleWg.Wait()         // Wait for the title updater to finish
 
 			if choice == "1" {
-				// Removed seller log export to save space
+				// Export seller logs for FN checker
+				GetStats().ExportSellerLog()
 			}
 
 			LogInfo("\nAll checking completed!")
@@ -552,14 +584,19 @@ func main() {
 				}
 			}
 
-			LogError("\nPress Enter to exit...")
+			LogSuccess("\nPress Enter to return to main menu...")
 			reader.ReadString('\n')
-			return
+			continue // Return to main menu instead of exiting
 
 		case "2":
 			ClearConsole()
 			PrintLogo()
 			BypassCheck()
+
+		case "3":
+			LogInfo("Opening links...")
+			exec.Command("cmd", "/c", "start", "https://frozi.lol/r").Run()
+			time.Sleep(1 * time.Second)
 
 		default:
 			LogWarning("Invalid choice, please try again.")
@@ -567,8 +604,6 @@ func main() {
 		}
 	}
 }
-
-// Removed old dashboard and utility functions for modern UI
 
 // Auto-filter accounts by criteria
 func shouldProcessAccount(displayName, epicEmail string, skinCount int, vbucks int, hasStw bool) bool {
@@ -609,27 +644,24 @@ func UpdateTitle(wg *sync.WaitGroup) {
 		ClearConsole()
 		PrintLogo()
 
-		// Center and display stats vertically
 		fmt.Println()
-		LogInfo(centerText(fmt.Sprintf("Progress: %d/%d checked", Check, len(Ccombos)), 80))
-		LogInfo(centerText(fmt.Sprintf("Hits: %d | CPM: %d | Time: %dm %ds", Hits, cpm*60, minutes, seconds), 80))
-		fmt.Println()
-
-		LogInfo(centerText("Skin List:", 80))
-		LogInfo(centerText(fmt.Sprintf("0 Skins: %d", ZeroSkin), 80))
-		LogInfo(centerText(fmt.Sprintf("1-9 Skins: %d", OnePlus), 80))
-		LogInfo(centerText(fmt.Sprintf("10+ Skins: %d", TenPlus), 80))
-		LogInfo(centerText(fmt.Sprintf("50+ Skins: %d", FiftyPlus), 80))
-		LogInfo(centerText(fmt.Sprintf("100+ Skins: %d", HundredPlus), 80))
-		LogInfo(centerText(fmt.Sprintf("300+ Skins: %d", ThreeHundredPlus), 80))
-		fmt.Println()
-
-		LogInfo(centerText("Specials:", 80))
-		LogInfo(centerText(fmt.Sprintf("Rares: %d", Rares), 80))
-		LogInfo(centerText(fmt.Sprintf("Headless: %d", Headless), 80))
-		LogInfo(centerText(fmt.Sprintf("FA: %d", Sfa), 80))
-		LogInfo(centerText(fmt.Sprintf("2FA: %d", Twofa), 80))
+		LogInfo(centerText(fmt.Sprintf("Total Hits: %d", Hits), 80))
 		LogInfo(centerText(fmt.Sprintf("Epic 2FA: %d", EpicTwofa), 80))
+		LogInfo(centerText(fmt.Sprintf("2FA: %d", Twofa), 80))
+		LogInfo(centerText(fmt.Sprintf("FA: %d", Sfa), 80))
+		LogInfo(centerText(fmt.Sprintf("Headless: %d", Headless), 80))
+		LogInfo(centerText(fmt.Sprintf("Rares: %d", Rares), 80))
+		fmt.Println()
+
+		LogInfo(centerText("0 Skins: "+fmt.Sprintf("%d", ZeroSkin), 80))
+		LogInfo(centerText("1-9 Skins: "+fmt.Sprintf("%d", OnePlus), 80))
+		LogInfo(centerText("10+ Skins: "+fmt.Sprintf("%d", TenPlus), 80))
+		LogInfo(centerText("50+ Skins: "+fmt.Sprintf("%d", FiftyPlus), 80))
+		LogInfo(centerText("100+ Skins: "+fmt.Sprintf("%d", HundredPlus), 80))
+		LogInfo(centerText("300+ Skins: "+fmt.Sprintf("%d", ThreeHundredPlus), 80))
+		fmt.Println()
+		LogInfo(centerText("1K+ V-Bucks: "+fmt.Sprintf("%d", Vbucks1kPlus), 80))
+		LogInfo(centerText("3K+ V-Bucks: "+fmt.Sprintf("%d", Vbucks3kPlus), 80))
 
 		// Update Discord RPC if enabled
 		if RPCEnabled {
@@ -674,7 +706,7 @@ func initDiscordRPC() {
 	LogInfo("Initializing Discord RPC...")
 
 	// Try to login to Discord RPC with a working client ID
-	err := client.Login("383226320970055681") // Discord's own client ID (known to work)
+	err := client.Login(DiscordClientID) // Use custom client ID for OmesFN branding
 	if err != nil {
 		LogError(fmt.Sprintf("Failed to login to Discord RPC: %v", err))
 		LogError("Make sure Discord is running and RPC is enabled in User Settings > Activity Status")
@@ -686,7 +718,7 @@ func initDiscordRPC() {
 
 	// Set initial presence with minimal info first
 	err = client.SetActivity(client.Activity{
-		State:   "Ready to check Fortnite accounts",
+		State:   "Connected",
 		Details: "OmesFN - Idle",
 	})
 
@@ -710,7 +742,7 @@ func initDiscordRPC() {
 				// Keep the connection alive by re-setting the activity
 				now := time.Now()
 				err := client.SetActivity(client.Activity{
-					State:   "Ready to check Fortnite accounts",
+					State:   "Connected",
 					Details: "OmesFN - Idle",
 					Timestamps: &client.Timestamps{
 						Start: &now,
@@ -736,8 +768,8 @@ func updateDiscordPresence(details, state string) {
 	err := client.SetActivity(client.Activity{
 		State:      state,
 		Details:    details,
-		LargeImage: "fortnite_logo",
-		LargeText:  "OmesFN Fortnite Checker",
+		LargeImage: "fortnite-png-27062",
+		LargeText:  "OmesFN",
 		SmallImage: "checking",
 		SmallText:  "Active",
 		Timestamps: &client.Timestamps{

