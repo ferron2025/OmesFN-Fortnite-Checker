@@ -1556,9 +1556,6 @@ func CheckAccount(acc string) bool {
 		saveVbucksHit(acc, totalVbucks)
 	}
 
-	if len(ogSkinsFound) > 0 || len(rareSkinsFound) > 0 {
-		AddToRares(1)
-	}
 	ExportLock.Lock()
 	AddToHits(1)
 
